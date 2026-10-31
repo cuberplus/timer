@@ -1,0 +1,324 @@
+diff --git a/node_modules/smartcube-web-bluetooth/dist/cjs/index.cjs b/node_modules/smartcube-web-bluetooth/dist/cjs/index.cjs
+index 14c5e83..58b1f88 100644
+--- a/node_modules/smartcube-web-bluetooth/dist/cjs/index.cjs
++++ b/node_modules/smartcube-web-bluetooth/dist/cjs/index.cjs
+@@ -5405,61 +5405,45 @@ function buildRequestDeviceOptions(protocols, mode, extras) {
+     };
+ }
+ 
+-const GATT_CONNECT_TIMEOUT_MS = 25000;
+-const GATT_RETRY_MAX = 2;
+-const GATT_RETRY_BASE_DELAY_MS = 150;
+-function disconnectGattSafe(gatt) {
+-    return Promise.resolve(gatt.disconnect()).catch(() => { });
+-}
+-async function delay(ms) {
+-    await new Promise((r) => setTimeout(r, ms));
+-}
+-async function connectGattWithTimeout(gatt, timeoutMs) {
+-    const sym = Symbol('gattTimeout');
++const GATT_OPERATION_TIMEOUT_MS = 15_000;
++async function gattOperation(device, stage, operation, onStatus) {
++    const started = performance.now();
++    let timer;
++    onStatus?.(stage);
++    console.info('[Timer Bluetooth] Native GATT operation started', { stage, deviceName: device.name });
+     try {
+-        await Promise.race([
+-            gatt.connect(),
+-            new Promise((_, rej) => setTimeout(() => rej(sym), timeoutMs)),
++        const result = await Promise.race([
++            operation(),
++            new Promise((_, reject) => {
++                timer = setTimeout(() => reject(new Error(`${stage} timed out after 15 seconds. Wake the cube and retry; check that no other app is connected.`)), GATT_OPERATION_TIMEOUT_MS);
++            }),
+         ]);
++        console.info('[Timer Bluetooth] Native GATT operation completed', { stage, elapsedMs: Math.round(performance.now() - started) });
++        return result;
+     }
+-    catch (e) {
+-        if (e === sym) {
+-            await disconnectGattSafe(gatt);
+-            throw new Error('GATT connection timeout');
++    catch (failure) {
++        console.error('[Timer Bluetooth] Native GATT operation failed', { stage, elapsedMs: Math.round(performance.now() - started) }, failure);
++        try {
++            device.gatt?.disconnect();
+         }
+-        await disconnectGattSafe(gatt).catch(() => { });
+-        throw e;
++        catch (cleanupFailure) {
++            console.warn('[Timer Bluetooth] GATT cleanup failed', cleanupFailure);
++        }
++        throw failure;
++    }
++    finally {
++        clearTimeout(timer);
+     }
+ }
+-/**
+- * Connect GATT (if needed) and return normalized primary service UUIDs.
+- * Uses a connect timeout and limited retries on transient failures.
+- */
+-async function collectPrimaryServiceUuids(device) {
++async function collectPrimaryServiceUuids(device, onStatus) {
+     const gatt = device.gatt;
+-    if (!gatt) {
++    if (!gatt)
+         throw new Error('GATT unavailable on this device');
+-    }
+-    let lastErr;
+-    for (let attempt = 0; attempt <= GATT_RETRY_MAX; attempt++) {
+-        try {
+-            await connectGattWithTimeout(gatt, GATT_CONNECT_TIMEOUT_MS);
+-            const services = await gatt.getPrimaryServices();
+-            const set = new Set();
+-            for (const s of services) {
+-                set.add(normalizeUuid(s.uuid));
+-            }
+-            return set;
+-        }
+-        catch (e) {
+-            lastErr = e;
+-            await disconnectGattSafe(gatt);
+-            if (attempt < GATT_RETRY_MAX) {
+-                await delay(GATT_RETRY_BASE_DELAY_MS * (attempt + 1));
+-            }
+-        }
+-    }
+-    throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
++    await gattOperation(device, 'Opening Bluetooth GATT connection', () => gatt.connect(), onStatus);
++    const services = await gattOperation(device, 'Discovering Bluetooth services', () => gatt.getPrimaryServices(), onStatus);
++    const uuids = new Set(services.map(service => normalizeUuid(service.uuid)));
++    console.info('[Timer Bluetooth] Discovered GATT services', { deviceName: device.name, services: [...uuids] });
++    return uuids;
+ }
+ 
+ /**
+@@ -5596,7 +5580,7 @@ async function connectSmartCube(arg) {
+     opts.onStatus?.('Reading advertisements…');
+     const advertisementManufacturerData = await waitForManufacturerData(device, opts.enableAddressSearch ? 8000 : 2500);
+     opts.onStatus?.('Connecting…');
+-    const serviceUuids = await collectPrimaryServiceUuids(device);
++    const serviceUuids = await collectPrimaryServiceUuids(device, opts.onStatus);
+     const protocol = resolveProtocolByGatt(protocols, serviceUuids, device);
+     if (!protocol) {
+         try {
+diff --git a/node_modules/smartcube-web-bluetooth/dist/esm/index.mjs b/node_modules/smartcube-web-bluetooth/dist/esm/index.mjs
+index b67df6b..3a66421 100644
+--- a/node_modules/smartcube-web-bluetooth/dist/esm/index.mjs
++++ b/node_modules/smartcube-web-bluetooth/dist/esm/index.mjs
+@@ -5403,61 +5403,45 @@ function buildRequestDeviceOptions(protocols, mode, extras) {
+     };
+ }
+ 
+-const GATT_CONNECT_TIMEOUT_MS = 25000;
+-const GATT_RETRY_MAX = 2;
+-const GATT_RETRY_BASE_DELAY_MS = 150;
+-function disconnectGattSafe(gatt) {
+-    return Promise.resolve(gatt.disconnect()).catch(() => { });
+-}
+-async function delay(ms) {
+-    await new Promise((r) => setTimeout(r, ms));
+-}
+-async function connectGattWithTimeout(gatt, timeoutMs) {
+-    const sym = Symbol('gattTimeout');
++const GATT_OPERATION_TIMEOUT_MS = 15_000;
++async function gattOperation(device, stage, operation, onStatus) {
++    const started = performance.now();
++    let timer;
++    onStatus?.(stage);
++    console.info('[Timer Bluetooth] Native GATT operation started', { stage, deviceName: device.name });
+     try {
+-        await Promise.race([
+-            gatt.connect(),
+-            new Promise((_, rej) => setTimeout(() => rej(sym), timeoutMs)),
++        const result = await Promise.race([
++            operation(),
++            new Promise((_, reject) => {
++                timer = setTimeout(() => reject(new Error(`${stage} timed out after 15 seconds. Wake the cube and retry; check that no other app is connected.`)), GATT_OPERATION_TIMEOUT_MS);
++            }),
+         ]);
++        console.info('[Timer Bluetooth] Native GATT operation completed', { stage, elapsedMs: Math.round(performance.now() - started) });
++        return result;
+     }
+-    catch (e) {
+-        if (e === sym) {
+-            await disconnectGattSafe(gatt);
+-            throw new Error('GATT connection timeout');
++    catch (failure) {
++        console.error('[Timer Bluetooth] Native GATT operation failed', { stage, elapsedMs: Math.round(performance.now() - started) }, failure);
++        try {
++            device.gatt?.disconnect();
+         }
+-        await disconnectGattSafe(gatt).catch(() => { });
+-        throw e;
++        catch (cleanupFailure) {
++            console.warn('[Timer Bluetooth] GATT cleanup failed', cleanupFailure);
++        }
++        throw failure;
++    }
++    finally {
++        clearTimeout(timer);
+     }
+ }
+-/**
+- * Connect GATT (if needed) and return normalized primary service UUIDs.
+- * Uses a connect timeout and limited retries on transient failures.
+- */
+-async function collectPrimaryServiceUuids(device) {
++async function collectPrimaryServiceUuids(device, onStatus) {
+     const gatt = device.gatt;
+-    if (!gatt) {
++    if (!gatt)
+         throw new Error('GATT unavailable on this device');
+-    }
+-    let lastErr;
+-    for (let attempt = 0; attempt <= GATT_RETRY_MAX; attempt++) {
+-        try {
+-            await connectGattWithTimeout(gatt, GATT_CONNECT_TIMEOUT_MS);
+-            const services = await gatt.getPrimaryServices();
+-            const set = new Set();
+-            for (const s of services) {
+-                set.add(normalizeUuid(s.uuid));
+-            }
+-            return set;
+-        }
+-        catch (e) {
+-            lastErr = e;
+-            await disconnectGattSafe(gatt);
+-            if (attempt < GATT_RETRY_MAX) {
+-                await delay(GATT_RETRY_BASE_DELAY_MS * (attempt + 1));
+-            }
+-        }
+-    }
+-    throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
++    await gattOperation(device, 'Opening Bluetooth GATT connection', () => gatt.connect(), onStatus);
++    const services = await gattOperation(device, 'Discovering Bluetooth services', () => gatt.getPrimaryServices(), onStatus);
++    const uuids = new Set(services.map(service => normalizeUuid(service.uuid)));
++    console.info('[Timer Bluetooth] Discovered GATT services', { deviceName: device.name, services: [...uuids] });
++    return uuids;
+ }
+ 
+ /**
+@@ -5594,7 +5578,7 @@ async function connectSmartCube(arg) {
+     opts.onStatus?.('Reading advertisements…');
+     const advertisementManufacturerData = await waitForManufacturerData(device, opts.enableAddressSearch ? 8000 : 2500);
+     opts.onStatus?.('Connecting…');
+-    const serviceUuids = await collectPrimaryServiceUuids(device);
++    const serviceUuids = await collectPrimaryServiceUuids(device, opts.onStatus);
+     const protocol = resolveProtocolByGatt(protocols, serviceUuids, device);
+     if (!protocol) {
+         try {
+diff --git a/node_modules/smartcube-web-bluetooth/src/smartcube/attachment/gatt-snapshot.ts b/node_modules/smartcube-web-bluetooth/src/smartcube/attachment/gatt-snapshot.ts
+index 1d7a201..26a3d7a 100644
+--- a/node_modules/smartcube-web-bluetooth/src/smartcube/attachment/gatt-snapshot.ts
++++ b/node_modules/smartcube-web-bluetooth/src/smartcube/attachment/gatt-snapshot.ts
+@@ -1,63 +1,41 @@
+ import { normalizeUuid } from './normalize-uuid';
+ 
+-const GATT_CONNECT_TIMEOUT_MS = 25_000;
+-const GATT_RETRY_MAX = 2;
+-const GATT_RETRY_BASE_DELAY_MS = 150;
++const GATT_OPERATION_TIMEOUT_MS = 15_000;
+ 
+-function disconnectGattSafe(gatt: BluetoothRemoteGATTServer): Promise<void> {
+-    return Promise.resolve(
+-        (gatt as unknown as { disconnect(): Promise<void> }).disconnect()
+-    ).catch(() => {});
+-}
+-
+-async function delay(ms: number): Promise<void> {
+-    await new Promise((r) => setTimeout(r, ms));
+-}
+-
+-async function connectGattWithTimeout(gatt: BluetoothRemoteGATTServer, timeoutMs: number): Promise<void> {
+-    const sym = Symbol('gattTimeout');
++async function gattOperation<T>(
++    device: BluetoothDevice,
++    stage: string,
++    operation: () => Promise<T>,
++    onStatus?: (message: string) => void
++): Promise<T> {
++    const started = performance.now();
++    let timer: ReturnType<typeof setTimeout> | undefined;
++    onStatus?.(stage);
++    console.info('[Timer Bluetooth] Native GATT operation started', { stage, deviceName: device.name });
+     try {
+-        await Promise.race([
+-            gatt.connect(),
+-            new Promise<never>((_, rej) => setTimeout(() => rej(sym), timeoutMs)),
++        const result = await Promise.race([
++            operation(),
++            new Promise<never>((_, reject) => {
++                timer = setTimeout(() => reject(new Error(`${stage} timed out after 15 seconds. Wake the cube and retry; check that no other app is connected.`)), GATT_OPERATION_TIMEOUT_MS);
++            }),
+         ]);
+-    } catch (e) {
+-        if (e === sym) {
+-            await disconnectGattSafe(gatt);
+-            throw new Error('GATT connection timeout');
+-        }
+-        await disconnectGattSafe(gatt).catch(() => {});
+-        throw e;
++        console.info('[Timer Bluetooth] Native GATT operation completed', { stage, elapsedMs: Math.round(performance.now() - started) });
++        return result;
++    } catch (failure) {
++        console.error('[Timer Bluetooth] Native GATT operation failed', { stage, elapsedMs: Math.round(performance.now() - started) }, failure);
++        try { device.gatt?.disconnect(); } catch (cleanupFailure) { console.warn('[Timer Bluetooth] GATT cleanup failed', cleanupFailure); }
++        throw failure;
++    } finally {
++        clearTimeout(timer);
+     }
+ }
+ 
+-/**
+- * Connect GATT (if needed) and return normalized primary service UUIDs.
+- * Uses a connect timeout and limited retries on transient failures.
+- */
+-export async function collectPrimaryServiceUuids(device: BluetoothDevice): Promise<ReadonlySet<string>> {
++export async function collectPrimaryServiceUuids(device: BluetoothDevice, onStatus?: (message: string) => void): Promise<ReadonlySet<string>> {
+     const gatt = device.gatt;
+-    if (!gatt) {
+-        throw new Error('GATT unavailable on this device');
+-    }
+-
+-    let lastErr: unknown;
+-    for (let attempt = 0; attempt <= GATT_RETRY_MAX; attempt++) {
+-        try {
+-            await connectGattWithTimeout(gatt, GATT_CONNECT_TIMEOUT_MS);
+-            const services = await gatt.getPrimaryServices();
+-            const set = new Set<string>();
+-            for (const s of services) {
+-                set.add(normalizeUuid(s.uuid));
+-            }
+-            return set;
+-        } catch (e) {
+-            lastErr = e;
+-            await disconnectGattSafe(gatt);
+-            if (attempt < GATT_RETRY_MAX) {
+-                await delay(GATT_RETRY_BASE_DELAY_MS * (attempt + 1));
+-            }
+-        }
+-    }
+-    throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
++    if (!gatt) throw new Error('GATT unavailable on this device');
++    await gattOperation(device, 'Opening Bluetooth GATT connection', () => gatt.connect(), onStatus);
++    const services = await gattOperation(device, 'Discovering Bluetooth services', () => gatt.getPrimaryServices(), onStatus);
++    const uuids = new Set(services.map(service => normalizeUuid(service.uuid)));
++    console.info('[Timer Bluetooth] Discovered GATT services', { deviceName: device.name, services: [...uuids] });
++    return uuids;
+ }
+diff --git a/node_modules/smartcube-web-bluetooth/src/smartcube/connect.ts b/node_modules/smartcube-web-bluetooth/src/smartcube/connect.ts
+index 5f58fcb..7b04b94 100644
+--- a/node_modules/smartcube-web-bluetooth/src/smartcube/connect.ts
++++ b/node_modules/smartcube-web-bluetooth/src/smartcube/connect.ts
+@@ -157,7 +157,7 @@ export async function connectSmartCube(
+     );
+ 
+     opts.onStatus?.('Connecting…');
+-    const serviceUuids = await collectPrimaryServiceUuids(device);
++    const serviceUuids = await collectPrimaryServiceUuids(device, opts.onStatus);
+ 
+     const protocol = resolveProtocolByGatt(protocols, serviceUuids, device);
+ 

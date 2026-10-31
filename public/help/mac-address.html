@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#111827" />
+  <title>Find your cube's Bluetooth MAC address - Timer</title>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, sans-serif; background: #10141e; color: #e8edf5; line-height: 1.65; }
+    body { max-width: 800px; margin: auto; padding: 24px; }
+    section { background: #181f2d; border: 1px solid #2a3547; border-radius: 16px; padding: 20px; margin: 20px 0; }
+    h1 { line-height: 1.2; } h2 { font-size: 1.25rem; margin-top: 0; }
+    a { color: #65d3b0; } code { color: #b9e5ff; overflow-wrap: anywhere; }
+    li { margin-bottom: 10px; } .note { color: #bdc8d8; } footer { font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+  <header>
+    <a href="../">Back to Timer</a>
+    <h1>Find your cube's Bluetooth MAC address</h1>
+    <p>Try <strong>Connect cube</strong> with the MAC field empty first. Enter an address only if Timer asks for it.</p>
+  </header>
+  <section aria-labelledby="what">
+    <h2 id="what">What address does Timer need?</h2>
+    <p>The cube's Bluetooth MAC is six hexadecimal pairs, for example <code>AA:BB:CC:DD:EE:FF</code>. GAN protocols use it to derive encryption keys; automatic discovery is not always available in browsers. Other models may not require manual entry.</p>
+    <p>Use the <strong>cube's</strong> address, not your computer's Bluetooth adapter address, Wi-Fi MAC, device name, or serial number.</p>
+  </section>
+  <section aria-labelledby="windows">
+    <h2 id="windows">Windows: Microsoft Edge or Chrome</h2>
+    <ol>
+      <li>Wake your cube using its manufacturer's instructions. If it is connected to another app, disconnect it there before scanning.</li>
+      <li>Open a new browser tab. Paste the appropriate address into the <strong>address bar</strong>, then press Enter:<br />
+        Edge: <code>edge://bluetooth-internals/#devices</code><br />
+        Chrome: <code>chrome://bluetooth-internals/#devices</code>
+      </li>
+      <li>On the <strong>Devices</strong> page, select <strong>Start Scan</strong>. Locate your cube by its advertised name; do not select the computer's adapter.</li>
+      <li>Copy the cube's <strong>Address</strong> value, then stop the scan. Do not connect to the cube from the diagnostics page.</li>
+      <li>Return to Timer. Paste the address into <strong>Bluetooth MAC (only if needed)</strong>, then click <strong>Connect cube</strong> and select the same cube.</li>
+    </ol>
+    <p class="note">Internal browser pages must be opened from the address bar, not as ordinary website links. If this page or scanning is unavailable, use the Android method below.</p>
+  </section>
+  <section aria-labelledby="android">
+    <h2 id="android">Android: nRF Connect for Mobile</h2>
+    <ol>
+      <li>Install <a href="https://www.nordicsemi.com/Products/Development-tools/nRF-Connect-for-mobile" target="_blank" rel="noopener noreferrer">nRF Connect for Mobile by Nordic Semiconductor</a>. Enable Bluetooth and grant the scan permissions it requests.</li>
+      <li>Wake the cube, start a BLE scan, and find it by name. Copy the Bluetooth address displayed with its scan result. You only need to scan, not connect.</li>
+      <li>Stop scanning and return to Timer on your computer. Enter that address and connect.</li>
+    </ol>
+  </section>
+  <section aria-labelledby="other">
+    <h2 id="other">iPhone, iPad, and macOS caveats</h2>
+    <p>iOS does not expose the hardware MAC to normal Bluetooth scanner apps. An iOS device UUID is <strong>not</strong> the MAC Timer needs. Use Windows or Android to obtain it.</p>
+    <p>Do not use Chrome's Bluetooth-internals address on macOS for a GAN cube: the library author's FAQ warns that this value is not the real hardware MAC. See the FAQ below for macOS-specific alternatives.</p>
+  </section>
+  <section aria-labelledby="trouble">
+    <h2 id="trouble">Still not connecting?</h2>
+    <ul>
+      <li>If nothing appears, check Bluetooth is enabled, wake the cube again, bring it closer, and disconnect other apps using it.</li>
+      <li>Timer accepts uppercase or lowercase hexadecimal, with <strong>colons</strong>. Convert <code>AABBCCDDEEFF</code> or <code>AA-BB-CC-DD-EE-FF</code> to <code>AA:BB:CC:DD:EE:FF</code> before pasting.</li>
+      <li>A valid-looking but incorrect address can still produce an encryption/verification failure. Recheck the same cube's scan result rather than guessing.</li>
+    </ul>
+  </section>
+  <footer>
+    <p>Sources:
+      <a href="https://gist.github.com/afedotov/52057533a8b27a0277598160c384ae71" target="_blank" rel="noopener noreferrer">GAN library author's MAC-address FAQ</a>;
+      <a href="https://techcommunity.microsoft.com/discussions/edgeinsiderdiscussions/list-of-all-edge-urls/1077142" target="_blank" rel="noopener noreferrer">Microsoft Edge internal pages</a>;
+      <a href="https://www.nordicsemi.com/Products/Development-tools/nRF-Connect-for-mobile" target="_blank" rel="noopener noreferrer">Nordic's scanner documentation</a>;
+      <a href="https://devzone.nordicsemi.com/f/nordic-q-a/74770/nrf-connect-ios" target="_blank" rel="noopener noreferrer">Nordic's iOS MAC-address explanation</a>.
+    </p>
+    <p>This help page runs locally in your browser. It does not scan devices or upload addresses. External resources open only when you choose their links.</p>
+  </footer>
+</body>
+</html>

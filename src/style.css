@@ -1,0 +1,19 @@
+:root { color-scheme: dark; }
+body { background: #10141e; color: #e8edf5; }
+h1 { font-weight: 800; letter-spacing: -2px; font-size: 2.8rem; margin: 0; }
+h2 { font-size: 1.1rem; font-weight: 650; margin-bottom: 0.8rem; }
+.brand-dot { color: #65d3b0; }
+.panel { background: #181f2d; border: 1px solid #2a3547; border-radius: 16px; padding: 1.5rem; }
+.scramble, .move-timeline { font-family: ui-monospace, monospace; line-height: 2.1; }
+.move { display: inline-block; padding: 0 0.45rem; margin: 0 0.1rem; border-radius: 5px; border: 0; background: transparent; color: #e8edf5; }
+.move.done { color: #65d3b0; }
+.move.current { background: #65d3b0; color: #10141e; }
+.timer-panel { text-align: center; min-height: 360px; }
+.timer-panel.ready { border-color: #65d3b0; }
+.timer-value { font-size: clamp(4rem, 10vw, 7rem); font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: -0.04em; }
+.next-move { font-size: 1.5rem; }
+.btn-primary { background: #2d8070; border-color: #3d9c88; }
+.btn-primary:hover { background: #246d5e; border-color: #3d9c88; }
+.replay-speed { max-width: 90px; }
+.table { --bs-table-bg: transparent; }
+@media (max-width: 575px) { .panel { padding: 1rem; } .timer-panel { min-height: 300px; } }
