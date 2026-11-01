@@ -1,0 +1,1 @@
+import{n as e,_ as o}from"./cubing-core-UDTh7ent.js";e.expose&&o(()=>import("./inside-JAJOK2MI-BqP7hURJ.js"),[]).then(()=>{globalThis.postMessage?globalThis.postMessage("comlink-exposed"):globalThis.process.getBuiltinModule("node:worker_threads").parentPort?.postMessage("comlink-exposed")});var t=import.meta.url;export{t as WORKER_ENTRY_FILE_URL};
