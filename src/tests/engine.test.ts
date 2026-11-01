@@ -134,6 +134,54 @@ test('a post-solve authoritative mismatch invalidates a premature completion', (
   expect(engine.result?.status).toBe('incomplete');
 });
 
+test('preparing the next scramble preserves the result and timing until the next solve starts', () => {
+  const { engine, turn } = create();
+  turn('R'); turn('U2'); turn('U'); turn('U'); turn("R'");
+  const result = engine.result!;
+  engine.prepare('F L2');
+  expect(engine.phase).toBe('scrambling');
+  expect(engine.elapsed(10000)).toBe(200);
+  expect(engine.result).toBe(result);
+  turn('F'); turn('L2');
+  expect(engine.phase).toBe('ready');
+  expect(engine.elapsed(10000)).toBe(200);
+  turn('L');
+  expect(engine.active?.moves[0].elapsed).toBe(0);
+  expect(engine.elapsed(engine.active!.moves[0].hostTime)).toBe(0);
+  turn('L'); turn("F'");
+  expect(engine.result?.id).not.toBe(result.id);
+  expect(engine.result?.status).toBe('complete');
+  expect(result.status).toBe('complete');
+});
+
+test('automatic next preparation does not bypass post-solve snapshot validation', () => {
+  const { engine, records, turn } = create();
+  turn('R'); turn('U2'); turn('U2'); turn("R'");
+  engine.prepare('F');
+  engine.snapshot(cube.facelets(cube.solved().applyMove('R')));
+  expect(engine.phase).toBe('recovery');
+  expect(engine.result?.status).toBe('incomplete');
+  expect(records.at(-1)?.status).toBe('incomplete');
+});
+
+test('a mismatch after a new scramble turn does not invalidate the previous completed solve', () => {
+  const { engine, turn } = create();
+  turn('R'); turn('U2'); turn('U2'); turn("R'");
+  engine.prepare('F L2');
+  turn('F');
+  engine.snapshot(SOLVED);
+  expect(engine.phase).toBe('recovery');
+  expect(engine.result?.status).toBe('complete');
+});
+
+test('preparation failure does not invalidate an already completed solve', () => {
+  const { engine, turn } = create();
+  turn('R'); turn('U2'); turn('U2'); turn("R'");
+  engine.fail('Scramble generation failed.', false);
+  expect(engine.phase).toBe('recovery');
+  expect(engine.result?.status).toBe('complete');
+});
+
 test('arbitrary synchronized cube state requires a valid solving setup', () => {
   const { engine } = create();
   engine.synchronize(cube.facelets(cube.solved().applyMove('F')));

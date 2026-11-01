@@ -9,7 +9,7 @@ export const movesOf = (alg: string): string[] => alg.trim() ? alg.trim().split(
 export const inverse = (move: string): string => move.includes('2') ? move[0] + '2' : move.endsWith("'") ? move[0] : move + "'";
 
 // Facelet locations in cubing.js's Reid orbit order; centers are ULFRBD.
-const locations = {
+export const locations = {
   EDGES: [[7, 19], [5, 10], [1, 46], [3, 37], [28, 25], [32, 16], [34, 52], [30, 43], [23, 12], [21, 41], [48, 14], [50, 39]],
   CORNERS: [[8, 9, 20], [2, 45, 11], [0, 36, 47], [6, 18, 38], [29, 26, 15], [27, 44, 24], [33, 53, 42], [35, 17, 51]],
 };
@@ -22,12 +22,9 @@ export class Cube {
     const stickers = SOLVED.split('');
     for (const orbit of ['EDGES', 'CORNERS'] as const) {
       const data = pattern.patternData[orbit];
-      locations[orbit].forEach((indices, position) => {
-        indices.forEach((_, sticker) => {
-          stickers[indices[(sticker + data.orientation[position]) % indices.length]] =
-            SOLVED[locations[orbit][data.pieces[position]][sticker]];
-        });
-      });
+      locations[orbit].forEach((indices, position) => indices.forEach((index, sticker) => {
+        stickers[index] = SOLVED[locations[orbit][data.pieces[position]][(sticker - data.orientation[position] + indices.length) % indices.length]];
+      }));
     }
     return stickers.join('');
   }

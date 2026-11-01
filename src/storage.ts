@@ -1,5 +1,6 @@
 import type { Solve } from './engine';
 import { Cube, isMove, movesOf } from './puzzle';
+import { analyzeCFOP, CFOP_STEPS, cfopFrame, cfopTiming, elapsedAt } from './cfop';
 
 const database = (): Promise<IDBDatabase> => new Promise((resolve, reject) => {
   const request = indexedDB.open('smart-cube-timer', 1);
@@ -72,9 +73,71 @@ export function validateBackup(json: string, cube: Cube): Solve[] {
 }
 
 export const backupJSON = (solves: Solve[]): string => JSON.stringify({ format: 'timer-v1', solves }, null, 2);
-export const average = (solves: Solve[], count: number): number | null => {
-  const values = solves.filter(s => s.status === 'complete').slice(0, count).map(s => s.duration).sort((a, b) => a - b);
-  return values.length === count ? values.slice(1, -1).reduce((a, b) => a + b, 0) / (count - 2) : null;
-};
+function rollingAverages(values: number[], count: number): { current: number | null; best: number | null } {
+  if (values.length < count || count < 3) return { current: null, best: null };
+  const trim = Math.ceil(count / 20), kept = count - trim * 2, sorted = values.slice(0, count).sort((a, b) => a - b);
+  let sum = sorted.slice(trim, -trim).reduce((a, b) => a + b, 0);
+  const current = sum / kept; let best = current;
+  const position = (value: number) => {
+    let low = 0, high = sorted.length;
+    while (low < high) { const mid = (low + high) >>> 1; if (sorted[mid] < value) low = mid + 1; else high = mid; }
+    return low;
+  };
+  for (let i = count; i < values.length; i++) {
+    // Account for values crossing the trimmed boundaries as the window slides.
+    const outgoing = position(values[i - count]);
+    sum -= outgoing < trim ? sorted[trim] : outgoing >= count - trim ? sorted[count - trim - 1] : sorted[outgoing];
+    sorted.splice(outgoing, 1);
+    const incoming = position(values[i]);
+    sum += incoming < trim ? sorted[trim - 1] : incoming >= count - trim ? sorted[count - trim - 1] : values[i];
+    sorted.splice(incoming, 0, values[i]); best = Math.min(best, sum / kept);
+  }
+  return { current, best };
+}
+export const average = (solves: Solve[], count: number): number | null => rollingAverages(solves.filter(s => s.status === 'complete').slice(0, count).map(s => s.duration), count).current;
+export function sessionStats(solves: Solve[]): { name: string; current: number | 'DNF' | null; best: number | null }[] {
+  const values = solves.filter(s => s.status === 'complete').map(s => s.duration), latest = solves.find(s => s.status !== 'active');
+  return [
+    { name: 'Single', current: !latest ? null : latest.status === 'complete' ? latest.duration : 'DNF', best: values.length ? values.reduce((best, value) => Math.min(best, value), Infinity) : null },
+    ...[5, 12, 100, 1000].map(count => ({ name: `Ao${count}`, ...rollingAverages(values, count) })),
+  ];
+}
 export const turns = (solve: Solve): number => solve.moves.reduce((n, move) => n + (move.move.includes('2') ? 2 : 1), 0);
-export const formatTime = (milliseconds: number): string => (milliseconds / 1000).toFixed(2);
+export const formatTime = (milliseconds: number, precision: 2 | 3 = 2): string => (milliseconds / 1000).toFixed(precision);
+
+const cubeastColumns = 'id,date,dnf,time,solving_method,device_name,device_model,device_color_scheme,user,one_turn_away_two_second_penalty,inspection_two_second_penalty,inspection_time,timer_time,missing_turn,solution,timer,description,session_name,session_ruleset,scramble,scramble_provider,ruleset,share_views,share_likes,share_comments,analysis_version,solution_rotation,pickup_time,putdown_time,solving_time,slice_turns,face_turns,quarter_turns,turns_per_second,total_recognition_time,total_execution_time,turns_after_solution,steps_skipped'.split(',').concat(
+  Array.from({ length: 9 }, (_, i) => 'name,moves,recorded_moves,skipped,has_turns,time,recognition_time,execution_time,cumulative_time,slice_turns,face_turns,quarter_turns,turns_per_second'.split(',').map(field => `step_${i}_${field}`)).flat(),
+  Array.from({ length: 9 }, (_, i) => `step_${i}_case`),
+);
+const csvCell = (value: string | number | boolean): string => /[",\r\n]/.test(String(value)) ? `"${String(value).replace(/"/g, '""')}"` : String(value);
+export function cubeastCSV(solves: Solve[], cube: Cube): string {
+  const rows = solves.filter(solve => solve.status !== 'active').map(solve => {
+    const duration = solve.status === 'complete' ? Math.round(solve.duration) : '';
+    const values: Record<string, string | number | boolean> = {
+      id: solve.id, date: new Date(solve.createdAt).toISOString().slice(0, 19).replace('T', ' ') + ' UTC',
+      dnf: solve.status !== 'complete', time: duration, timer_time: duration, solving_time: duration,
+      device_name: solve.device, session_name: solve.session, scramble: solve.scramble, scramble_provider: 'random_state',
+      solution: solve.moves.map((move, i) => `${move.move}[${Math.round(elapsedAt(solve, i + 1))}]`).join(' '),
+      timer: 'cube', solving_method: 'CFOP', description: solve.reason, slice_turns: solve.moves.length, face_turns: solve.moves.length,
+      quarter_turns: turns(solve), turns_per_second: solve.duration > 0 ? (solve.moves.length * 1000 / solve.duration).toFixed(2) : '',
+    };
+    const analysis = analyzeCFOP(solve, cube), frame = analysis.cross === null ? (move: string) => move : cfopFrame(cube, analysis.cross);
+    CFOP_STEPS.forEach((name, i) => {
+      const start = analysis.ends[i - 1] ?? 0, end = analysis.ends[i];
+      values[`step_${i}_name`] = name; if (end === undefined) return;
+      const moves = solve.moves.slice(start, end), { end: cumulative, time, recognition, execution } = cfopTiming(solve, analysis.ends, i);
+      const step: Record<string, string | number | boolean> = {
+        moves: moves.map(move => frame(move.move)).join(' '), recorded_moves: moves.map((move, j) => `${frame(move.move)}[${Math.round(elapsedAt(solve, start + j + 1))}]`).join(' '),
+        skipped: start === end, has_turns: moves.length > 0, time, cumulative_time: cumulative,
+        recognition_time: recognition, execution_time: execution, slice_turns: moves.length, face_turns: moves.length,
+        quarter_turns: turns({ ...solve, moves }), turns_per_second: time > 0 ? (moves.length * 1000 / time).toFixed(2) : '',
+      };
+      Object.entries(step).forEach(([field, value]) => { values[`step_${i}_${field}`] = value; });
+    });
+    values.steps_skipped = analysis.ends.filter((end, i) => end === (analysis.ends[i - 1] ?? 0)).length;
+    values.total_recognition_time = analysis.ends.reduce((sum, _, i) => sum + Number(values[`step_${i}_recognition_time`]), 0);
+    values.total_execution_time = analysis.ends.reduce((sum, _, i) => sum + Number(values[`step_${i}_execution_time`]), 0);
+    return cubeastColumns.map(column => csvCell(values[column] ?? '')).join(',');
+  });
+  return [cubeastColumns.join(','), ...rows, ''].join('\r\n');
+}

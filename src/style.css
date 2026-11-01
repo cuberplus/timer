@@ -11,7 +11,15 @@ h2 { font-size: 1.1rem; font-weight: 650; margin-bottom: 0.8rem; }
 .timer-panel { text-align: center; min-height: 360px; }
 .timer-panel.ready { border-color: #65d3b0; }
 .timer-value { font-size: clamp(4rem, 10vw, 7rem); font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: -0.04em; }
-.next-move { font-size: 1.5rem; }
+.trail-labels { position: relative; }
+.trail-labels svg { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.trail-labels line { opacity: 0.6; vector-effect: non-scaling-stroke; }
+.trail-duration { position: absolute; height: 22px; font-size: 0.75rem; line-height: 20px; font-variant-numeric: tabular-nums; white-space: nowrap; background: #181f2d; border-bottom: 2px solid; transform: translateX(-50%); }
+.solve-trail { position: relative; height: 24px; overflow: hidden; border-radius: 6px; background: #10141e; }
+.trail-segment { position: absolute; top: 0; bottom: 0; }
+.trail-segment.recognition { filter: brightness(0.6); }
+.trail-tip { position: absolute; top: 0; bottom: 0; width: 3px; background: white; transform: translateX(-50%); transition: left 30ms linear; }
+@media (prefers-reduced-motion: reduce) { .trail-tip { transition: none; } }
 .btn-primary { background: #2d8070; border-color: #3d9c88; }
 .btn-primary:hover { background: #246d5e; border-color: #3d9c88; }
 .replay-speed { max-width: 90px; }

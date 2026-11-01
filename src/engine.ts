@@ -3,31 +3,17 @@ import { Cube, inverse, isMove, movesOf } from './puzzle';
 
 export type Phase = 'disconnected' | 'synchronizing' | 'scrambling' | 'ready' | 'solving' | 'finished' | 'recovery';
 export interface Turn {
-  move: string;
-  hostTime: number;
-  localTimestamp: number | null;
-  cubeTimestamp: number | null;
-  serial?: number;
+  move: string; hostTime: number; serial?: number;
+  localTimestamp: number | null; cubeTimestamp: number | null;
 }
 export interface RecordedTurn extends Turn { elapsed: number }
-export interface Orientation {
-  elapsed: number;
-  quaternion: { x: number; y: number; z: number; w: number };
-}
+export interface Orientation { elapsed: number; quaternion: { x: number; y: number; z: number; w: number } }
 export interface Solve {
-  version: 1;
-  id: string;
-  session: string;
-  createdAt: string;
-  device: string;
-  scramble: string;
-  startFacelets: string;
-  duration: number;
+  version: 1; id: string; session: string; createdAt: string; device: string;
+  scramble: string; startFacelets: string; duration: number;
   status: 'active' | 'complete' | 'incomplete';
-  reason: string;
-  timingBasis: 'host' | 'device-fit';
-  moves: RecordedTurn[];
-  orientations: Orientation[];
+  reason: string; timingBasis: 'host' | 'device-fit';
+  moves: RecordedTurn[]; orientations: Orientation[];
 }
 
 // GAN and MoYu history windows use circular 8-bit turn counters.
@@ -40,8 +26,7 @@ export function finalizeTiming(moves: RecordedTurn[]): { duration: number; timin
   const xs = moves.map(m => m.cubeTimestamp! - first.cubeTimestamp!);
   const ys = moves.map(m => m.localTimestamp! - first.localTimestamp!);
   if (xs.some((x, i) => i > 0 && x <= xs[i - 1]) || ys.some((y, i) => i > 0 && y < ys[i - 1])) return { duration: host, timingBasis: 'host' };
-  const meanX = xs.reduce((a, b) => a + b, 0) / xs.length;
-  const meanY = ys.reduce((a, b) => a + b, 0) / ys.length;
+  const meanX = xs.reduce((a, b) => a + b, 0) / xs.length, meanY = ys.reduce((a, b) => a + b, 0) / ys.length;
   const variance = xs.reduce((a, x) => a + (x - meanX) ** 2, 0);
   const slope = xs.reduce((a, x, i) => a + (x - meanX) * (ys[i] - meanY), 0) / variance;
   const residual = Math.sqrt(xs.reduce((a, x, i) => a + (ys[i] - (meanY + slope * (x - meanX))) ** 2, 0) / xs.length);
@@ -52,43 +37,32 @@ export function finalizeTiming(moves: RecordedTurn[]): { duration: number; timin
 export class TimerEngine {
   phase: Phase = 'disconnected';
   pattern: KPattern;
-  scramble = '';
-  progress = 0;
-  instructions: string[] = [];
-  recovery: string[] = [];
-  message = 'Connect your cube to begin.';
-  device = '';
-  session = 'Default';
-  active: Solve | null = null;
-  result: Solve | null = null;
+  scramble = ''; progress = 0; instructions: string[] = [];
+  message = 'Connect your cube to begin.'; device = ''; session = 'Default';
+  active: Solve | null = null; result: Solve | null = null;
   lastSerial: number | undefined;
-  private checkpoints: KPattern[] = [];
-  private partial: string[] = [];
-  private started = 0;
+  private checkpoints: KPattern[] = []; private partial: string[] = [];
+  private started = 0; private pendingResult = false;
   constructor(readonly cube: Cube, private readonly record: (solve: Solve) => void, private readonly changed: () => void) {
     this.pattern = cube.solved();
   }
+  private setPhase(phase: Phase, message: string): void { this.phase = phase; this.message = message; this.changed(); }
   get facelets(): string { return this.cube.facelets(this.pattern); }
-  get nextMove(): string {
-    if (!this.recovery.length && this.partial.length === 1 && this.instructions[this.progress]?.includes('2')) return this.partial[0];
-    return this.recovery[0] ?? this.instructions[this.progress] ?? '';
+  get recovery(): string[] {
+    const expected = this.instructions[this.progress], move = this.partial[0];
+    return expected?.includes('2') && this.partial.length === 1 && move[0] === expected[0] && !move.includes('2') ? [] : [...this.partial].reverse().map(inverse);
   }
+  get nextMove(): string { return this.recovery[0] ?? this.partial[0] ?? this.instructions[this.progress] ?? ''; }
   connect(device: string): void {
     this.interrupt('Connection changed.');
-    this.device = device;
-    this.phase = 'synchronizing';
-    this.lastSerial = undefined;
-    this.message = 'Reading cube state. If unavailable, physically solve and confirm calibration.';
-    this.changed();
+    this.device = device; this.pendingResult = false; this.lastSerial = undefined;
+    this.setPhase('synchronizing', 'Reading cube state. If unavailable, physically solve and confirm calibration.');
   }
   synchronize(facelets: string, serial?: number): void {
     const pattern = this.cube.parse(facelets);
     this.interrupt('Cube state was resynchronized.');
-    this.pattern = pattern;
-    this.lastSerial = serial;
-    this.phase = 'synchronizing';
-    this.message = 'State synchronized. Preparing scramble guidance.';
-    this.changed();
+    this.pattern = pattern; this.lastSerial = serial; this.pendingResult = false;
+    this.setPhase('synchronizing', 'State synchronized. Preparing scramble guidance.');
   }
   prepare(scramble: string, setup: string[] = []): void {
     const moves = movesOf(scramble);
@@ -97,16 +71,9 @@ export class TimerEngine {
     const checkpoints = [this.pattern];
     [...setup, ...moves].forEach(move => checkpoints.push(checkpoints[checkpoints.length - 1].applyMove(move)));
     if (!this.cube.equals(checkpoints[setup.length], this.cube.solved())) throw new Error('Setup does not solve the current cube.');
-    this.scramble = scramble;
-    this.instructions = [...setup, ...moves];
-    this.checkpoints = checkpoints;
-    this.progress = 0;
-    this.partial = [];
-    this.recovery = [];
-    this.result = null;
-    this.phase = 'scrambling';
-    this.message = setup.length ? 'Follow setup moves to solve the cube, then scramble.' : 'Follow the highlighted scramble move.';
-    this.changed();
+    this.scramble = scramble; this.instructions = [...setup, ...moves]; this.checkpoints = checkpoints;
+    this.progress = 0; this.partial = [];
+    this.setPhase('scrambling', setup.length ? 'Follow setup moves to solve the cube, then scramble.' : 'Follow the highlighted scramble move.');
   }
   snapshot(facelets: string, serial?: number): void {
     this.cube.parse(facelets);
@@ -130,6 +97,7 @@ export class TimerEngine {
       if (distance !== 1) { this.fail('Move counter gap or reset detected. Resynchronize the cube.'); return; }
     }
     if (turn.serial !== undefined) this.lastSerial = turn.serial;
+    if (this.phase === 'scrambling') this.pendingResult = false;
     if (this.phase === 'ready') {
       this.started = turn.hostTime;
       this.active = {
@@ -147,7 +115,7 @@ export class TimerEngine {
         Object.assign(this.active, finalizeTiming(this.active.moves), { status: 'complete' });
         this.result = this.active;
         this.active = null;
-        this.phase = 'finished';
+        this.phase = 'finished'; this.pendingResult = true;
         this.message = 'Solved! Your full move timeline is recorded.';
         this.record(this.result);
       } else this.record(this.active);
@@ -157,36 +125,18 @@ export class TimerEngine {
   private guide(move: string): void {
     const target = this.checkpoints[this.checkpoints.length - 1];
     if (this.cube.equals(this.pattern, target)) {
-      this.progress = this.instructions.length;
-      this.partial = [];
-      this.recovery = [];
+      this.progress = this.instructions.length; this.partial = [];
       this.phase = 'ready';
       this.message = 'Scramble complete. Your next face turn starts the timer.';
       return;
     }
-    const current = this.checkpoints[this.progress];
     const next = this.checkpoints[this.progress + 1];
-    if (next && this.cube.equals(this.pattern, next)) {
-      this.progress++;
-      this.partial = [];
-      this.recovery = [];
-    } else if (this.cube.equals(this.pattern, current)) {
-      this.partial = [];
-      this.recovery = [];
-    } else {
-      if (this.recovery.length && move === this.recovery[0]) {
-        this.recovery.shift();
-        this.partial.pop();
-      } else this.partial.push(move);
-      const expected = this.instructions[this.progress];
-      const halfTurn = expected?.includes('2') && this.partial.length === 1 && move[0] === expected[0] && !move.includes('2');
-      this.recovery = halfTurn ? [] : [...this.partial].reverse().map(inverse);
-      if (halfTurn) {
-        this.message = `Turn ${move} once more to complete ${expected}.`;
-        return;
-      }
-    }
-    this.message = this.recovery.length ? 'Wrong turn. Follow correction moves back to the checkpoint.' : 'Follow the highlighted move.';
+    if (next && this.cube.equals(this.pattern, next)) this.progress++;
+    if (this.cube.equals(this.pattern, this.checkpoints[this.progress])) this.partial = [];
+    else if (move === this.recovery[0]) this.partial.pop();
+    else this.partial.push(move);
+    this.message = this.recovery.length ? 'Wrong turn. Follow correction moves back to the checkpoint.'
+      : this.partial.length ? `Turn ${this.partial[0]} once more to complete ${this.instructions[this.progress]}.` : 'Follow the highlighted move.';
   }
   gyro(quaternion: Orientation['quaternion'], hostTime: number): void {
     if (!this.active) return;
@@ -194,28 +144,22 @@ export class TimerEngine {
   }
   interrupt(reason: string): void {
     if (!this.active) return;
-    this.active.status = 'incomplete';
-    this.active.reason = reason;
+    Object.assign(this.active, { status: 'incomplete', reason });
     this.result = this.active;
     this.record(this.active);
     this.active = null;
   }
-  fail(reason: string): void {
-    if (this.phase === 'finished' && this.result?.status === 'complete') {
-      this.result.status = 'incomplete';
-      this.result.reason = reason;
+  fail(reason: string, invalidateResult = true): void {
+    if (invalidateResult && this.pendingResult && this.result?.status === 'complete') {
+      Object.assign(this.result, { status: 'incomplete', reason });
       this.record(this.result);
     }
     this.interrupt(reason);
-    this.phase = 'recovery';
-    this.message = reason;
-    this.changed();
+    this.setPhase('recovery', reason);
   }
   disconnect(): void {
     this.interrupt('Cube disconnected during the solve.');
-    this.phase = 'disconnected';
-    this.message = 'Cube disconnected. Connect and synchronize to continue.';
-    this.changed();
+    this.setPhase('disconnected', 'Cube disconnected. Connect and synchronize to continue.');
   }
   elapsed(now: number): number { return this.active ? Math.max(0, now - this.started) : this.result?.duration ?? 0; }
 }

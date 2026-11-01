@@ -48,8 +48,11 @@ explicit permission.
    and is recorded as the first solve move.
 6. Process every received move in order. The turn that solves the cube stops the
    timer and remains in the recording. Ignore center orientation when recognizing
-   a solved ordinary 3x3. Preserve the result until the user starts the next scramble.
-7. Save locally, show statistics, and support timeline replay and JSON backup.
+   a solved ordinary 3x3. Automatically prepare the next scramble, retaining the
+   last time until the next solve starts. Buffer incoming moves and snapshots
+   during preparation without changing their original host timestamps.
+7. Save locally, show statistics, and support timeline replay, Cubeast CSV export,
+   and lossless JSON backup.
 
 ## State and integrity
 
@@ -80,7 +83,7 @@ Only validated legal 54-facelet 3x3 states can be accepted. 2x2 is out of scope.
 ## Screen and local data
 
 Responsive layout: connection and battery controls, scramble across the top,
-large timer and status, live cube with guidance, and recent solve history.
+large timer, status, and cube together in one card, and recent solve history.
 Replay includes play/pause, speed selection, and move stepping. A clearly labeled
 simulated cube uses the same engine and persistence path for development/testing.
 
@@ -91,9 +94,47 @@ can retain interrupted recordings. Surface storage failures; never claim a solve
 was saved if its transaction failed. Export/import validates the complete schema
 and preserves data without a backend. Imports merge by identifier.
 
-Statistics include completed single times, best, move count, TPS, Ao5, and Ao12.
+Statistics include current/best Single, Ao5, Ao12, Ao100, and Ao1000, plus move
+count and TPS. Best averages examine every rolling completed-solve window in the
+session, not just displayed rows. Ao5/Ao12 trim one fastest and slowest result;
+Ao100 trims five each, and Ao1000 fifty each. The latest incomplete single is
+shown as DNF, and unavailable statistics as `--`. Cache statistics between timer
+ticks to avoid repeatedly scanning session history.
 Incomplete attempts remain visible but are excluded from completed-solve averages.
-CFOP/Roux recognition/execution analysis, third-party CSV compatibility, accounts,
+CSV exports match the 164-column Cubeast sample schema in smartcubeanalyzer.
+Export finished attempts across all sessions, excluding active recordings.
+Use UTC dates, millisecond times, and raw `move[timestamp]` solution notation;
+incomplete attempts are DNFs with blank result times. Quote special CSV characters.
+CFOP analysis runs incrementally from every recorded turn during the solve, not
+only on export. Show Cross, F2L Pair 1/2/3/4, OLL, and PLL milestones beside the
+timer with cumulative completion times. Lock the first correctly aligned cross
+on any face; simultaneous initial crosses use a deterministic D-first tie-break.
+Subsequent F2L milestones require that cross intact and 1/2/3/4 pairs simultaneously
+solved. Milestones remain latched. OLL requires complete F2L and orientation of the
+opposite face; PLL includes final AUF and requires fully solved state. Initially
+complete and same-turn stages use shared boundaries and zero-move skips.
+Incomplete or subsequently invalidated attempts cannot claim PLL completion.
+Derive the same analysis from old recordings without changing the backup schema.
+CSV contains seven CFOP stages and their moves, normalized into a D-cross frame,
+with fitted-device or host times matching the full timeline. Recognition is
+inferred from the gap to a stage's first turn (zero for Cross); execution is the
+remaining stage time, not a measurement of the user's thinking. Unknown physical
+color, case IDs, and unavailable metadata stay blank. JSON backups additionally
+preserve raw device clocks and orientation samples.
+Display a live trail across the timer/cube card, auto-rescaling to fit the solve
+and filling the full width with proportional durations at completion. Use
+smartcubeanalyzer's dark Cross/OLL/PLL colors and related purple shades for F2L.
+Recognition uses a darker shade of its step color; execution uses the lighter
+shade. Show duration callouts along the bar, anchored to each step's midpoint;
+spread crowded labels and use multiple rows on narrow screens. Omit the separate
+base-cross label, step badges, and explanatory paragraph. Tooltips retain step
+names and the recognition/execution breakdown. Derive bar and CSV timings with the same
+helper. Zero-time skips consume no width, and incomplete stages remain pending.
+Time precision is a browser-persisted option (hundredths or thousandths), applied
+consistently to timer, steps, history, statistics, and replay without altering raw
+recordings or exports.
+
+Roux analysis, Acubemy CSV compatibility, accounts,
 multiplayer, 2x2, and formal WCA inspection penalties are outside the first release.
 
 ## Implementation sequence and acceptance
