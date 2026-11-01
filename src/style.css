@@ -2,12 +2,15 @@
 body { background: #10141e; color: #e8edf5; }
 h1 { font-weight: 800; letter-spacing: -2px; font-size: 2.8rem; margin: 0; }
 h2 { font-size: 1.1rem; font-weight: 650; margin-bottom: 0.8rem; }
-.brand-dot { color: #65d3b0; }
 .panel { background: #181f2d; border: 1px solid #2a3547; border-radius: 16px; padding: 1.5rem; }
+.options-dialog { width: min(480px, calc(100% - 2rem)); max-height: calc(100% - 2rem); margin: auto; overflow-y: auto; color: #e8edf5; box-shadow: 0 16px 64px #0008; }
+.options-dialog::backdrop { background: #000a; }
 .scramble, .move-timeline { font-family: ui-monospace, monospace; line-height: 2.1; }
 .move { display: inline-block; padding: 0 0.45rem; margin: 0 0.1rem; border-radius: 5px; border: 0; background: transparent; color: #e8edf5; }
 .move.done { color: #65d3b0; }
 .move.current { background: #65d3b0; color: #10141e; }
+.move.current.partial { background: #f5b942; }
+.move.correction { background: #dc3545; color: #fff; }
 .timer-panel { text-align: center; min-height: 360px; }
 .timer-panel.ready { border-color: #65d3b0; }
 .timer-value { font-size: clamp(4rem, 10vw, 7rem); font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: -0.04em; }

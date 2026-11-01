@@ -6,6 +6,7 @@ test('MAC address help opens separately, remains local, and links back to Timer'
     if (/^https?:/.test(request.url()) && !request.url().startsWith('http://127.0.0.1:4173/')) external.push(request.url());
   });
   await page.goto('');
+  await page.getByRole('button', { name: 'Options', exact: true }).click();
   const input = page.getByPlaceholder('AA:BB:CC:DD:EE:FF');
   await input.fill('AA:BB:CC:DD:EE:FF');
   const popupPromise = page.waitForEvent('popup');

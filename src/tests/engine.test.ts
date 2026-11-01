@@ -46,9 +46,11 @@ test('double turns complete from either pair of quarter turns; scramble completi
   turn('R');
   turn("U'");
   expect(engine.phase).toBe('scrambling');
+  expect(engine.isPartialTurn).toBe(true);
   expect(engine.nextMove).toBe("U'");
   turn("U'");
   expect(engine.phase).toBe('ready');
+  expect(engine.isPartialTurn).toBe(false);
   expect(records).toHaveLength(0);
   expect(engine.active).toBeNull();
 });
@@ -71,6 +73,7 @@ test('mistakes guide back to the last checkpoint without starting timing', () =>
   const { engine, turn } = create();
   turn('L'); turn('F');
   expect(engine.recovery).toEqual(["F'", "L'"]);
+  expect(engine.isPartialTurn).toBe(false);
   turn("F'");
   expect(engine.nextMove).toBe("L'");
   turn("L'");
@@ -80,12 +83,103 @@ test('mistakes guide back to the last checkpoint without starting timing', () =>
   expect(engine.phase).toBe('ready');
 });
 
+test.each([false, true])('returning to solved restarts the original scramble after setup: %s', setup => {
+  const { engine, records, turn } = create();
+  if (setup) {
+    engine.synchronize(cube.facelets(cube.solved().applyMove('F')));
+    engine.prepare('R U2', ["F'"]);
+    turn("F'");
+  }
+  turn('R'); turn('F');
+  expect(engine.recovery).toEqual(["F'"]);
+  turn("F'"); turn("R'");
+  expect(engine.recovery).toEqual([]);
+  expect(engine.progress).toBe(setup ? 1 : 0);
+  expect(engine.nextMove).toBe('R');
+  expect(engine.scramble).toBe('R U2');
+  expect(engine.phase).toBe('scrambling');
+  expect(records).toHaveLength(0);
+  turn('R'); turn('U2');
+  expect(engine.phase).toBe('ready');
+});
+
+test('solving by a different sequence clears outstanding corrections and scramble progress', () => {
+  const { engine, turn } = create('R U F2');
+  const moves = Array.from({ length: 6 }, () => ['R', 'U', "R'", "U'"]).flat();
+  moves.slice(0, -1).forEach(move => turn(move));
+  expect(engine.recovery.length).toBeGreaterThan(0);
+  turn(moves[moves.length - 1]);
+  expect(cube.isSolved(engine.pattern)).toBe(true);
+  expect(engine.recovery).toEqual([]);
+  expect(engine.progress).toBe(0);
+  expect(engine.nextMove).toBe('R');
+  expect(engine.phase).toBe('scrambling');
+});
+
 test('undoing a partial double turn returns to its checkpoint', () => {
   const { engine, turn } = create();
-  turn('R'); turn('U'); turn("U'");
+  turn('R'); turn('U');
+  expect(engine.isPartialTurn).toBe(true);
+  turn("U'");
+  expect(engine.isPartialTurn).toBe(false);
   expect(engine.progress).toBe(1);
   expect(engine.nextMove).toBe('U2');
   expect(engine.recovery).toEqual([]);
+});
+
+test.each([
+  ['U', 10, ['U2']],
+  ["U'", 10, ['U2']],
+  ['U', 3, ['U']],
+  ['U', 4, []],
+  ['U2', 3, ['U2']],
+  ["R2'", 1, ['R2']],
+  ['F', 2, ['F2']],
+] as const)('simplifies undoing %s repeated %i times', (move, count, expected) => {
+  const { engine, turn } = create(move[0] === 'R' ? 'F' : 'R');
+  for (let i = 0; i < count; i++) turn(move);
+  expect(engine.recovery).toEqual(expected);
+  expect(cube.isSolved(engine.pattern.applyAlg(engine.recovery.join(' ')))).toBe(true);
+  engine.recovery.forEach(move => turn(move));
+  expect(engine.recovery).toEqual([]);
+  expect(engine.progress).toBe(0);
+  expect(engine.phase).toBe('scrambling');
+});
+
+test.each([false, true])('shortened corrections remain correct when double turns arrive as quarters: %s', split => {
+  const { engine, turn } = create();
+  turn('F');
+  for (let i = 0; i < 10; i++) turn('U');
+  expect(engine.recovery).toEqual(['U2', "F'"]);
+  if (split) {
+    turn('U');
+    expect(engine.recovery).toEqual(['U', "F'"]);
+    turn('U');
+  } else turn('U2');
+  expect(engine.recovery).toEqual(["F'"]);
+  turn("F'");
+  expect(engine.recovery).toEqual([]);
+  expect(engine.nextMove).toBe('R');
+  expect(cube.isSolved(engine.pattern)).toBe(true);
+});
+
+test('corrections cancel commuting moves without changing noncommuting move order', () => {
+  const { engine, turn } = create();
+  for (const move of ['F', 'U', 'D', 'U', "D'"]) turn(move);
+  expect(engine.recovery).toEqual(['U2', "F'"]);
+  engine.recovery.forEach(move => turn(move));
+  for (const move of ['F', 'U', "F'", "U'"]) turn(move);
+  expect(engine.recovery).toEqual(['U', 'F', "U'", "F'"]);
+  expect(cube.isSolved(engine.pattern.applyAlg(engine.recovery.join(' ')))).toBe(true);
+});
+
+test('correction simplification never condenses recorded solve turns', () => {
+  const { engine, turn } = create('R');
+  turn('R');
+  for (let i = 0; i < 10; i++) turn('F');
+  turn('F2'); turn("R'");
+  expect(engine.result?.status).toBe('complete');
+  expect(engine.result?.moves.map(move => move.move)).toEqual([...Array<string>(10).fill('F'), 'F2', "R'"]);
 });
 
 test('same serial is ignored but repeated legitimate moves are recorded', () => {

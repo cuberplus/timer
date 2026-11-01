@@ -1,5 +1,9 @@
+import { Alg } from 'cubing/alg';
 import type { KPattern } from 'cubing/kpuzzle';
+import { puzzles } from 'cubing/puzzles';
 import { Cube, inverse, isMove, movesOf } from './puzzle';
+
+const simplifyMoves = (moves: string[]): string[] => movesOf(new Alg(moves.join(' ')).experimentalSimplify({ cancel: true, puzzleLoader: puzzles['3x3x3'] }).toString());
 
 export type Phase = 'disconnected' | 'synchronizing' | 'scrambling' | 'ready' | 'solving' | 'finished' | 'recovery';
 export interface Turn {
@@ -50,9 +54,10 @@ export class TimerEngine {
   get facelets(): string { return this.cube.facelets(this.pattern); }
   get recovery(): string[] {
     const expected = this.instructions[this.progress], move = this.partial[0];
-    return expected?.includes('2') && this.partial.length === 1 && move[0] === expected[0] && !move.includes('2') ? [] : [...this.partial].reverse().map(inverse);
+    return expected?.includes('2') && this.partial.length === 1 && move[0] === expected[0] && !move.includes('2') ? [] : simplifyMoves([...this.partial].reverse().map(inverse));
   }
   get nextMove(): string { return this.recovery[0] ?? this.partial[0] ?? this.instructions[this.progress] ?? ''; }
+  get isPartialTurn(): boolean { return this.phase === 'scrambling' && this.partial.length === 1 && this.recovery.length === 0; }
   connect(device: string): void {
     this.interrupt('Connection changed.');
     this.device = device; this.pendingResult = false; this.lastSerial = undefined;
@@ -130,11 +135,16 @@ export class TimerEngine {
       this.message = 'Scramble complete. Your next face turn starts the timer.';
       return;
     }
+    if (this.cube.isSolved(this.pattern)) {
+      this.progress = this.instructions.length - movesOf(this.scramble).length;
+      this.partial = [];
+      this.message = 'Follow the highlighted scramble move.';
+      return;
+    }
     const next = this.checkpoints[this.progress + 1];
     if (next && this.cube.equals(this.pattern, next)) this.progress++;
     if (this.cube.equals(this.pattern, this.checkpoints[this.progress])) this.partial = [];
-    else if (move === this.recovery[0]) this.partial.pop();
-    else this.partial.push(move);
+    else this.partial = simplifyMoves([...this.partial, move]);
     this.message = this.recovery.length ? 'Wrong turn. Follow correction moves back to the checkpoint.'
       : this.partial.length ? `Turn ${this.partial[0]} once more to complete ${this.instructions[this.progress]}.` : 'Follow the highlighted move.';
   }

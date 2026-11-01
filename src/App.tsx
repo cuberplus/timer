@@ -9,7 +9,6 @@ import { Replay } from './Replay';
 import { SolveTimeline } from './SolveTimeline';
 
 const errorText = (error: Error): string => error.message || 'The operation failed.';
-const labels = { disconnected: 'Disconnected', synchronizing: 'Synchronizing', scrambling: 'Scrambling', ready: 'Ready', solving: 'Solving', finished: 'Finished', recovery: 'Resynchronize' };
 
 export default function App() {
   const [, render] = useReducer(n => n + 1, 0);
@@ -27,6 +26,7 @@ export default function App() {
   const [session, setSession] = useState('Default');
   const [replay, setReplay] = useState<Solve | null>(null);
   const engine = useRef<TimerEngine | null>(null);
+  const optionsDialog = useRef<HTMLDialogElement>(null);
   const bluetooth = useRef(new BluetoothCube());
   const writes = useRef(Promise.resolve());
   const pending = useRef(0);
@@ -186,50 +186,63 @@ export default function App() {
     return { filtered, statistics: sessionStats(filtered) };
   }, [history, session]);
   const setupCount = timer ? timer.instructions.length - timer.scramble.trim().split(/\s+/).length : 0;
+  const correctionMoves = timer?.phase === 'scrambling' ? timer.recovery : [];
+  const currentMoveClass = timer?.isPartialTurn ? 'current partial' : 'current';
   const connected = timer && timer.phase !== 'disconnected';
   const canConnect = !!cube && !busy && !connecting && !connected && !!navigator.bluetooth && window.isSecureContext;
   const simulate = (move: string) => receive({ type: 'MOVE', timestamp: performance.now(), move, face: 'URFDLB'.indexOf(move[0]), direction: move.endsWith("'") ? 1 : 0, localTimestamp: performance.now(), cubeTimestamp: null });
   return <main className="container py-4">
     <header className="d-flex justify-content-between align-items-center flex-wrap gap-3 mb-4">
-      <div><h1>Timer<span className="brand-dot">.</span></h1><p className="text-secondary mb-0">Smart cube timing. Entirely in your browser.</p></div>
+      <h1>CuberPlus - Timer</h1>
       <div className="d-flex align-items-center gap-2 flex-wrap">
-        <details><summary className="btn btn-outline-secondary">Options</summary>
-          <label className="mt-2">Time precision<select aria-label="Time precision" className="form-select" value={precision} onChange={event => changePrecision(event.target.value === '3' ? 3 : 2)}><option value="2">Hundredths (0.00)</option><option value="3">Thousandths (0.000)</option></select></label></details>
-        {battery !== null && <span className="badge text-bg-secondary">{battery}% battery</span>}
+        <button className="btn btn-outline-secondary" onClick={() => optionsDialog.current?.showModal()}>Options</button>
         {connected ? <button className="btn btn-outline-secondary" onClick={() => void disconnect()}>Disconnect</button> :
           <><button className="btn btn-primary" disabled={!canConnect} onClick={connect}>{connecting ? 'Connecting...' : 'Connect cube'}</button>
-          <button className="btn btn-outline-secondary" disabled={!cube || busy || connecting} onClick={startDemo}>Try simulated cube</button></>}
+          <button hidden className="btn btn-outline-secondary" disabled={!cube || busy || connecting} onClick={startDemo}>Try simulated cube</button></>}
+        {battery !== null && <span className="badge text-bg-secondary">{battery}% battery</span>}
       </div>
     </header>
-    {(!navigator.bluetooth || !window.isSecureContext) && <p className="alert alert-info">Bluetooth needs a supported browser and HTTPS or localhost. Try Chrome/Edge on Windows, or use the simulated cube.</p>}
+    <dialog ref={optionsDialog} className="panel options-dialog" aria-labelledby="options-title">
+      <div className="d-flex justify-content-between align-items-center mb-4">
+        <h2 id="options-title" className="mb-0">Options</h2>
+        <button className="btn-close btn-close-white" aria-label="Close options" onClick={() => optionsDialog.current?.close()} />
+      </div>
+      <label className="d-block mb-3">Session<input className="form-control mt-2" maxLength={100} value={session} disabled={timer?.phase === 'solving'} onChange={event => setSession(event.target.value)} /></label>
+      <label className="d-block">Time precision<select aria-label="Time precision" className="form-select mt-2" value={precision} onChange={event => changePrecision(event.target.value === '3' ? 3 : 2)}><option value="2">Hundredths (0.00)</option><option value="3">Thousandths (0.000)</option></select></label>
+      {!connected && <div className="mt-4">
+        <form onSubmit={event => { event.preventDefault(); if (canConnect) { optionsDialog.current?.close(); connect(); } }}><label className="d-block">Bluetooth MAC (only if needed)<input className="form-control mt-2" placeholder="AA:BB:CC:DD:EE:FF" value={mac} disabled={connecting} onChange={event => setMac(event.target.value)} /></label></form>
+        <a className="d-inline-block mt-2" href="help/mac-address.html" target="_blank" rel="noopener noreferrer">Find my cube's MAC address</a>
+      </div>}
+      {error.startsWith('Time precision changed') && <p role="alert" className="text-warning mt-3 mb-0">{error}</p>}
+      <form method="dialog" className="text-end mt-4"><button className="btn btn-primary">Done</button></form>
+    </dialog>
+    {(!navigator.bluetooth || !window.isSecureContext) && <p className="alert alert-info">Bluetooth needs a supported browser and HTTPS or localhost. Try Chrome/Edge on Windows.</p>}
     {error && <div className="alert alert-danger d-flex justify-content-between" role="alert">{error}<button className="btn-close" aria-label="Dismiss error" onClick={() => setError('')} /></div>}
-    <div className="d-flex gap-3 flex-wrap align-items-end mb-3">
-      <label>Session<input className="form-control" maxLength={100} value={session} disabled={timer?.phase === 'solving'} onChange={event => setSession(event.target.value)} /></label>
-      {!connected && <><form onSubmit={event => { event.preventDefault(); connect(); }}><label>Bluetooth MAC (only if needed)<input className="form-control" placeholder="AA:BB:CC:DD:EE:FF" value={mac} disabled={connecting} onChange={event => setMac(event.target.value)} /></label></form><a href="help/mac-address.html" target="_blank" rel="noopener noreferrer">Find my cube's MAC address</a></>}
-      <span className="text-secondary small">{storage}</span>
-    </div>
-    <section className="panel">
-      <h2>Scramble</h2>
-      <div className="scramble" aria-label="Scramble">{timer?.scramble ? timer.scramble.split(/\s+/).map((move, i) =>
-        <span key={i} className={`move ${i + setupCount < timer.progress ? 'done' : i + setupCount === timer.progress ? 'current' : ''}`}>{move}</span>) : <span className="text-secondary">Connect a cube to generate a scramble.</span>}</div>
-      {setupCount > 0 && timer && timer.progress < setupCount && <p className="mt-2">First solve the current cube: <strong>{timer.instructions.slice(timer.progress, setupCount).join(' ')}</strong></p>}
-      {timer?.recovery.length ? <p className="text-warning mt-2">Correction: {timer.recovery.join(' ')}</p> : null}
-    </section>
-    <section className={`panel timer-panel mt-3 ${timer?.phase === 'ready' ? 'ready' : ''}`}>
+    {!['Saved locally', 'Saving locally...'].includes(storage) && <p className="text-secondary small mb-3">{storage}</p>}
+    <section className={`panel timer-panel ${timer?.phase === 'ready' ? 'ready' : ''}`}>
+      <div className="scramble mb-3" aria-label="Scramble">{timer?.scramble ? <>
+        {timer.scramble.split(/\s+/).map((move, i) => correctionMoves.length && i + setupCount >= timer.progress ? null :
+          <span key={i} className={`move ${i + setupCount < timer.progress ? 'done' : i + setupCount === timer.progress ? currentMoveClass : ''}`} title={i + setupCount === timer.progress && timer.isPartialTurn ? 'Partially complete' : undefined}>{move}</span>)}
+        {!!correctionMoves.length && <span role="group" aria-label="Correction moves">{correctionMoves.map((move, i) =>
+          <span key={i} className={`move correction ${i === 0 ? 'current' : ''}`}>{move}</span>)}</span>}
+      </> : <span className="text-secondary">Connect a cube to generate a scramble.</span>}</div>
+      {setupCount > 0 && timer && timer.progress < setupCount && !correctionMoves.length && <p className="mt-2">First solve the current cube: <strong>{timer.instructions.slice(timer.progress, setupCount).map((move, i) =>
+        <span key={i} className={`move ${i === 0 ? currentMoveClass : ''}`} title={i === 0 && timer.isPartialTurn ? 'Partially complete' : undefined}>{move}</span>)}</strong></p>}
       <div className="row g-3 align-items-center"><div className="col-lg-7">
-          <span className="badge text-bg-secondary">{timer ? labels[timer.phase] : 'Loading puzzle...'}</span>
           <div className="timer-value" aria-label="Solve time">{formatTime(elapsed, precision)}</div>
-          {!message.startsWith('Follow the highlighted') && <p role="status">{message}</p>}
+          {!/^(?:Follow the highlighted|Wrong turn\.|Turn .+ once more to complete |Scramble complete\.)/.test(message) && <p role="status">{message}</p>}
           {timer?.active && <p>{timer.active.moves.length} reported moves recorded</p>}
-          {connected && <div className="d-flex justify-content-center gap-2 flex-wrap">
-            <button className="btn btn-outline-secondary" disabled={busy || timer.phase === 'solving'} onClick={() => void resynchronize()}>Read cube state</button>
-            <button className="btn btn-outline-secondary" disabled={busy || timer.phase === 'solving'} onClick={calibrate}>Cube is physically solved - calibrate</button>
-            {timer.phase === 'solving' && <button className="btn btn-outline-warning" onClick={() => timer.fail('Solve aborted by user.')}>Abort solve</button>}
+          {connected && timer.phase === 'solving' && <div className="d-flex justify-content-center gap-2 flex-wrap">
+            <button className="btn btn-outline-warning" onClick={() => timer.fail('Solve aborted by user.')}>Abort solve</button>
           </div>}
       </div><div className="col-lg-5">
         {cube && timer && <CubeView cube={cube} facelets={timer.facelets} />}
       </div></div>
           {cube && solve && <SolveTimeline cube={cube} solve={solve} elapsed={elapsed} precision={precision} />}
+          {connected && <div className="d-flex justify-content-center gap-2 flex-wrap mt-3">
+            <button className="btn btn-outline-secondary" disabled={busy || timer.phase === 'solving'} onClick={() => void resynchronize()}>Read cube state</button>
+            <button className="btn btn-outline-secondary" disabled={busy || timer.phase === 'solving'} onClick={calibrate}>Cube is physically solved - calibrate</button>
+          </div>}
           {demo && <div className="demo mt-4">
             <p className="text-warning">Simulated cube - not a physical Bluetooth connection</p>
             <div className="d-flex justify-content-center gap-2 flex-wrap">
@@ -261,17 +274,16 @@ export default function App() {
         <label className={`btn btn-outline-secondary mb-0 ${timer?.phase === 'solving' ? 'disabled' : ''}`}>Import JSON<input type="file" className="visually-hidden" accept=".json,application/json" disabled={timer?.phase === 'solving'} onChange={event => { void importBackup(event.target.files?.[0]); event.target.value = ''; }} /></label>
       </div></div>
       <div className="table-responsive"><table className="table align-middle" aria-label="Solve history">
-        <thead><tr><th>Time</th><th>Date</th><th>Turns (QTM)</th><th>TPS</th><th>Recording</th><th>Replay</th></tr></thead>
+        <thead><tr><th>Time</th><th>Turns</th><th>TPS</th><th>View</th></tr></thead>
         <tbody>{filtered.slice(0, 100).map(solve => <tr key={solve.id}>
-          <td>{formatTime(solve.duration, precision)}s</td><td>{new Date(solve.createdAt).toLocaleString()}</td><td>{turns(solve)}</td>
+          <td>{formatTime(solve.duration, precision)}s</td><td>{turns(solve)}</td>
           <td>{solve.duration > 0 ? (turns(solve) * 1000 / solve.duration).toFixed(2) : '--'}</td>
-          <td title={solve.reason}>{solve.status}{solve.device === 'Simulated 3x3' ? ' (simulated)' : ''}</td>
-          <td><button className="btn btn-sm btn-outline-secondary" onClick={() => setReplay(solve)}>Replay</button></td>
+          <td><button className="btn btn-sm btn-outline-secondary" onClick={() => setReplay(solve)}>View</button></td>
         </tr>)}</tbody>
       </table></div>
       {!filtered.length && <p className="text-secondary">No solves in this session yet. Your data stays on this device.</p>}
     </section>
     {cube && replay && <Replay key={replay.id} cube={cube} solve={replay} precision={precision} close={() => setReplay(null)} />}
-    <footer className="text-secondary small mt-4">Browser-only. No API, backend, accounts, or uploads. Export backups before clearing browser data. Version 0.2.0.</footer>
+    <footer className="text-secondary small mt-4">Browser-only. No API, backend, accounts, or uploads. Export backups before clearing browser data. Version 0.2.1.</footer>
   </main>;
 }
