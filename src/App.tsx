@@ -7,10 +7,12 @@ import { backupJSON, cubeastCSV, formatTime, readSolves, saveSolves, sessionStat
 import { CubeView } from './CubeView';
 import { Replay } from './Replay';
 import { SolveTimeline } from './SolveTimeline';
+import { useScreenWakeLock } from './useScreenWakeLock';
 
 const errorText = (error: Error): string => error.message || 'The operation failed.';
 
 export default function App() {
+  useScreenWakeLock();
   const [, render] = useReducer(n => n + 1, 0);
   const [cube, setCube] = useState<Cube | null>(null);
   const [history, setHistory] = useState<Solve[]>([]);
