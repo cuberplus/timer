@@ -1,7 +1,7 @@
 import 'fake-indexeddb/auto';
 import { TimerEngine, type Solve } from '../engine';
 import { Cube, loadCube, SOLVED } from '../puzzle';
-import { average, backupJSON, cubeastCSV, readSolves, saveSolves, sessionStats, turns, validateBackup } from '../storage';
+import { average, backupJSON, cubeastCSV, newPersonalBests, personalBestNotifications, readSolves, saveSolves, sessionStats, turns, validateBackup } from '../storage';
 
 let cube: Cube;
 beforeAll(async () => { cube = await loadCube(); });
@@ -20,12 +20,70 @@ test('persists complete records and merges by id', async () => {
   const items = await readSolves();
   expect(items.filter(item => item.id === solve.id)).toHaveLength(1);
   expect(items.find(item => item.id === solve.id)?.session).toBe('Updated');
+  expect(items.find(item => item.id === solve.id)?.inspection).toBe(100);
 });
 
 test('JSON backup preserves every raw timing and turn', () => {
   const solve = sample();
   expect(validateBackup(backupJSON([solve]), cube)).toEqual([solve]);
   expect(turns(solve)).toBe(3);
+});
+
+test('penalties round-trip through local storage and backups without changing raw timing', async () => {
+  const solve: Solve = { ...sample(), penalty: 2000, penaltyReason: 'over-turn' };
+  await saveSolves([solve]);
+  const restored = (await readSolves()).find(item => item.id === solve.id)!;
+  expect(validateBackup(backupJSON([restored]), cube)).toEqual([solve]);
+});
+
+test('legacy penalties and DNFs receive reasons, including recovered active attempts', () => {
+  const seed = sample();
+  const restored = validateBackup(backupJSON([
+    { ...seed, id: 'legacy-plus-two', penalty: 2000 },
+    { ...seed, id: 'legacy-abort', status: 'incomplete', reason: 'Solve aborted by user.' },
+    { ...seed, id: 'legacy-interrupt', status: 'incomplete', reason: 'Cube disconnected.' },
+    { ...seed, id: 'recovered', status: 'active' },
+  ]), cube);
+  expect(restored[0].penaltyReason).toBe('over-turn');
+  expect(restored.slice(1).map(solve => solve.dnfReason)).toEqual(['solve aborted', 'solve interrupted', 'solve interrupted']);
+  expect(validateBackup(backupJSON(restored), cube)).toEqual(restored);
+});
+
+test.each([
+  { penalty: 2000, penaltyReason: 'invalid' },
+  { penaltyReason: 'over-turn' },
+  { status: 'incomplete', dnfReason: 'invalid' },
+  { dnfReason: 'solve aborted' },
+])('rejects invalid penalty reason fields %j', fields => {
+  expect(() => validateBackup(JSON.stringify({ format: 'timer-v1', solves: [{ ...sample(), ...fields }] }), cube)).toThrow('Invalid solve record');
+});
+
+test.each([-2000, 0, 2, 4000, null, '2000'])('rejects invalid penalty %s in backups', penalty => {
+  expect(() => validateBackup(JSON.stringify({ format: 'timer-v1', solves: [{ ...sample(), penalty }] }), cube)).toThrow('Invalid solve record');
+});
+
+test('statistics and CSV totals include +2 while retaining raw solving and replay times', () => {
+  const solve: Solve = { ...sample(), duration: 3000, penalty: 2000 };
+  expect(sessionStats([solve])[0]).toEqual({ name: 'Single', current: 5000, best: 5000 });
+  expect(average(Array.from({ length: 5 }, () => solve), 5)).toBe(5000);
+  const [header, line] = cubeastCSV([solve], cube).split('\r\n');
+  const cells = line.split(',');
+  const row = Object.fromEntries(header.split(',').map((column, i) => [column, cells[i]]));
+  expect(row).toMatchObject({ time: '5000', timer_time: '3000', solving_time: '3000', one_turn_away_two_second_penalty: 'true', dnf: 'false' });
+  expect(solve.duration).toBe(3000);
+});
+
+test('older backups retain their IDs and leave missing inspection time unrecorded', () => {
+  const solve = sample();
+  delete solve.inspection;
+  expect(validateBackup(backupJSON([solve]), cube)).toEqual([solve]);
+  const [header, row] = cubeastCSV([solve], cube).split('\r\n');
+  expect(row.split(',')[header.split(',').indexOf('inspection_time')]).toBe('');
+});
+
+test.each([-1, null, 'invalid'])('rejects invalid inspection time %s in backups', inspection => {
+  const json = JSON.stringify({ format: 'timer-v1', solves: [{ ...sample(), inspection }] });
+  expect(() => validateBackup(json, cube)).toThrow('Invalid solve record');
 });
 
 test('recovers active recordings as incomplete', () => {
@@ -50,6 +108,41 @@ test('averages trim high/low and exclude incomplete attempts', () => {
   const items = [1, 2, 3, 4, 100].map(n => ({ ...solve, duration: n * 1000 }));
   expect(average([{ ...solve, status: 'incomplete' }, ...items], 5)).toBe(3000);
   expect(average(items, 12)).toBeNull();
+});
+
+test('identifies every single and average PB improved by the same solve', () => {
+  const seed = sample();
+  const previous = [12, 14, 16, 18, 20].map((seconds, i) => ({
+    ...seed, id: `previous-${i}`, duration: seconds * 1000, createdAt: new Date(Date.UTC(2026, 0, 1, 0, 0, 20 - i)).toISOString(),
+  }));
+  expect(newPersonalBests(previous, { ...seed, duration: 10000 })).toEqual([
+    { name: 'Single', time: 10000 }, { name: 'Ao5', time: 14000 },
+  ]);
+});
+
+test.each([5, 12, 100, 1000])('celebrates the first available Ao%s without re-celebrating tied smaller records', count => {
+  const seed = sample();
+  const previous = Array.from({ length: count - 1 }, (_, i) => ({ ...seed, id: `previous-${i}`, duration: 10000 }));
+  expect(newPersonalBests(previous, { ...seed, duration: 10000 })).toEqual([{ name: `Ao${count}`, time: 10000 }]);
+});
+
+test('PB detection respects session boundaries, penalties, ties and incomplete attempts', () => {
+  const seed = sample(), previous = [{ ...seed, id: 'previous', duration: 10000 }];
+  expect(newPersonalBests([], seed)).toEqual([{ name: 'Single', time: seed.duration }]);
+  expect(newPersonalBests(previous, { ...seed, duration: 10000 })).toEqual([]);
+  expect(newPersonalBests(previous, { ...seed, duration: 9000, penalty: 2000 })).toEqual([]);
+  expect(newPersonalBests(previous, { ...seed, duration: 1, status: 'incomplete' })).toEqual([]);
+  expect(newPersonalBests(previous, { ...seed, session: 'Other', duration: 20000 })).toEqual([{ name: 'Single', time: 20000 }]);
+});
+
+test('every short PB is eligible, while each long-average PB is eligible only once per daily ledger', () => {
+  const records = ['Single', 'Ao5', 'Ao12', 'Ao100', 'Ao1000'].map(name => ({ name, time: 10000 }));
+  const shown = new Set<string>();
+  expect(personalBestNotifications(records, shown)).toEqual(records);
+  expect(personalBestNotifications(records, shown).map(record => record.name)).toEqual(['Single', 'Ao5', 'Ao12']);
+  expect(personalBestNotifications(records, shown).map(record => record.name)).toEqual(['Single', 'Ao5', 'Ao12']);
+  expect(personalBestNotifications(records, new Set(['Ao100'])).map(record => record.name)).toEqual(['Single', 'Ao5', 'Ao12', 'Ao1000']);
+  expect(personalBestNotifications(records, new Set())).toEqual(records);
 });
 
 test('current and best singles respect the latest attempt while averages exclude unfinished recordings', () => {
@@ -109,7 +202,7 @@ test('Cubeast CSV matches the sample schema and records milliseconds, UTC dates,
     step_6_time: '1235', step_6_cumulative_time: '1235', steps_skipped: '5',
   });
   expect(columns.filter(column => /^step_[78]_/.test(column) || column.endsWith('_case')).every(column => row[column] === '')).toBe(true);
-  expect(row.inspection_time).toBe('');
+  expect(row.inspection_time).toBe('100');
 });
 
 test('Cubeast CSV escapes commas, quotes and newlines without changing stored data', () => {

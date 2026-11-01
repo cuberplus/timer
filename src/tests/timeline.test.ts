@@ -56,9 +56,10 @@ test('moving tip leaves the old step color intact and separates recognition from
   expect(pair[0].getAttribute('aria-label')).toBe('F2L Pair 1 recognition: 0.100s');
   expect(pair[1].getAttribute('aria-label')).toBe('F2L Pair 1 execution: 0.050s');
   const duration = container.querySelector('.trail-duration[data-step="1"]')!;
-  expect(duration.textContent).toBe('0.150s');
+  expect(duration.textContent).toBe('F2L 1 0.150s');
   expect(duration.getAttribute('aria-label')).toBe('F2L Pair 1: 0.150s (in progress)');
   expect(duration.getAttribute('title')).toContain('0.100s recognition / 0.050s execution');
+  expect(container.querySelector('.trail-duration[data-step="f2l"]')!.textContent).toBe('F2L 0.150s');
 });
 
 test.each([100, 100.125])('completed bar partitions the full solve with %sms intervals and honors display precision', async interval => {
@@ -73,13 +74,21 @@ test.each([100, 100.125])('completed bar partitions the full solve with %sms int
   expect(segments().reduce((sum, segment) => sum + parseFloat(segment.style.width), 0)).toBeCloseTo(100, 8);
   expect(new Set(segments().map(segment => segment.dataset.step)).size).toBe(7);
   const labels = Array.from(container.querySelectorAll<HTMLElement>('.trail-duration'));
-  expect(labels).toHaveLength(7);
-  expect(labels.reduce((sum, label) => sum + Number(label.dataset.duration), 0)).toBe(Math.round(solve.duration));
-  expect(container.querySelector('.trail-duration[data-step="6"]')!.textContent).toMatch(/^\d+\.\d{3}s$/);
+  expect(labels).toHaveLength(8);
+  const major = Array.from(container.querySelectorAll<HTMLElement>('[aria-label="CFOP steps"] .trail-duration'));
+  const pairs = Array.from(container.querySelectorAll<HTMLElement>('[aria-label="F2L sub-times"] .trail-duration'));
+  expect(major.map(label => label.querySelector('strong')!.textContent)).toEqual(['Cross', 'F2L', 'OLL', 'PLL']);
+  expect(pairs.map(label => label.querySelector('strong')!.textContent)).toEqual(['F2L 1', 'F2L 2', 'F2L 3', 'F2L 4']);
+  expect(major.reduce((sum, label) => sum + Number(label.dataset.duration), 0)).toBe(Math.round(solve.duration));
+  expect(Number(major[1].dataset.duration)).toBe(pairs.reduce((sum, label) => sum + Number(label.dataset.duration), 0));
+  const bar = container.querySelector('.solve-trail')!;
+  expect(bar.previousElementSibling!.getAttribute('aria-label')).toBe('CFOP steps');
+  expect(bar.nextElementSibling!.getAttribute('aria-label')).toBe('F2L sub-times');
+  expect(container.querySelector('.trail-duration[data-step="6"]')!.textContent).toMatch(/^PLL \d+\.\d{3}s$/);
   for (const text of ['Base cross', 'Darker:', 'lighter:', "first turn"]) expect(container.textContent).not.toContain(text);
   expect(container.querySelector('.badge')).toBeNull();
   await draw(solve.duration, 2);
-  expect(container.querySelector('.trail-duration[data-step="6"]')!.textContent).toMatch(/^\d+\.\d{2}s$/);
+  expect(container.querySelector('.trail-duration[data-step="6"]')!.textContent).toMatch(/^PLL \d+\.\d{2}s$/);
 });
 
 test('long active solves auto-rescale without dropping time, and unfinished stages stay pending', async () => {
@@ -92,14 +101,14 @@ test('long active solves auto-rescale without dropping time, and unfinished stag
   solve.status = 'incomplete';
   await draw(solve.duration);
   expect(container.querySelector('.trail-duration[data-step="1"][data-status="pending"]')).not.toBeNull();
-  expect(container.querySelector('.trail-duration[data-step="6"]')).toBeNull();
+  expect(container.querySelector('.trail-duration[data-step="6"][data-status="unreached"]')!.textContent).toBe('PLL --');
 });
 
 test('F2L pairs use distinct shades within one purple hue family', async () => {
   append(scramble.split(' ').reverse().map(inverse).join(' '));
   solve.status = 'complete';
   await draw(solve.duration);
-  const pairColors = [1, 2, 3, 4].map(i => container.querySelector<HTMLElement>(`.trail-duration[data-step="${i}"]`)!.style.borderBottomColor);
+  const pairColors = [1, 2, 3, 4].map(i => container.querySelector<HTMLElement>(`.trail-duration[data-step="${i}"]`)!.style.borderTopColor);
   expect(new Set(pairColors).size).toBe(4);
   const hues = pairColors.map(color => {
     const [red, green, blue] = color.match(/\d+/g)!.map(Number);
@@ -125,19 +134,23 @@ test('crowded and zero-time labels remain readable on narrow bars and repack aft
     await draw(solve.duration, 3);
     await act(async () => resize(240));
     const labels = Array.from(container.querySelectorAll<HTMLElement>('.trail-duration'));
-    expect(labels).toHaveLength(7);
-    expect(labels.filter(label => label.textContent === '0.000s')).toHaveLength(6);
-    for (const row of new Set(labels.map(label => label.style.top))) {
-      let edge = 0;
-      for (const label of labels.filter(item => item.style.top === row)) {
-        const center = parseFloat(label.style.left) / 100 * 240, half = parseFloat(label.style.width) / 2;
-        expect(center - half).toBeGreaterThanOrEqual(edge - 0.001);
-        expect(center + half).toBeLessThanOrEqual(240.001);
-        edge = center + half;
+    expect(labels).toHaveLength(8);
+    expect(labels.filter(label => label.textContent!.endsWith(' 0.000s'))).toHaveLength(7);
+    const banks = Array.from(container.querySelectorAll('.trail-labels'));
+    for (const bank of banks) {
+      const labels = Array.from(bank.querySelectorAll<HTMLElement>('.trail-duration'));
+      for (const row of new Set(labels.map(label => label.style.top))) {
+        let edge = 0;
+        for (const label of labels.filter(item => item.style.top === row)) {
+          const center = parseFloat(label.style.left) / 100 * 240, half = parseFloat(label.style.width) / 2;
+          expect(center - half).toBeGreaterThanOrEqual(edge - 0.001);
+          expect(center + half).toBeLessThanOrEqual(240.001);
+          edge = center + half;
+        }
       }
     }
     await act(async () => resize(900));
-    expect(new Set(labels.map(label => label.style.top)).size).toBe(1);
+    for (const bank of banks) expect(new Set(Array.from(bank.querySelectorAll<HTMLElement>('.trail-duration')).map(label => label.style.top)).size).toBe(1);
   } finally {
     if (original) Object.defineProperty(globalThis, 'ResizeObserver', original);
     else Reflect.deleteProperty(globalThis, 'ResizeObserver');

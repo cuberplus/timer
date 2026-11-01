@@ -7,6 +7,26 @@ export const SOLVED = 'UUUUUUUUURRRRRRRRRFFFFFFFFFDDDDDDDDDLLLLLLLLLBBBBBBBBB';
 export const isMove = (move: string): boolean => /^[URFDLB](2|'|2')?$/.test(move);
 export const movesOf = (alg: string): string[] => alg.trim() ? alg.trim().split(/\s+/) : [];
 export const inverse = (move: string): string => move.includes('2') ? move[0] + '2' : move.endsWith("'") ? move[0] : move + "'";
+export const sameAxis = (first: string, second: string): boolean => ['UD', 'RL', 'FB'].some(axis => axis.includes(first[0]) && axis.includes(second[0]));
+export function simplifyMoves(moves: readonly string[]): string[] {
+  const result: string[] = [];
+  const amount = (move: string) => move.includes('2') ? 2 : move.endsWith("'") ? 3 : 1;
+  const notation = (face: string, turns: number) => face + (turns === 2 ? '2' : turns === 3 ? "'" : '');
+  for (const move of moves) {
+    let merged = false;
+    // Search across opposite-face turns only; all other move order stays unchanged.
+    for (let i = result.length - 1; i >= 0 && sameAxis(result[i], move); i--) {
+      if (result[i][0] !== move[0]) continue;
+      const turns = (amount(result[i]) + amount(move)) % 4;
+      if (turns) result[i] = notation(move[0], turns);
+      else result.splice(i, 1);
+      merged = true;
+      break;
+    }
+    if (!merged) result.push(notation(move[0], amount(move)));
+  }
+  return result;
+}
 
 // Facelet locations in cubing.js's Reid orbit order; centers are ULFRBD.
 export const locations = {
@@ -58,4 +78,4 @@ export class Cube {
 }
 
 export const loadCube = async (): Promise<Cube> => new Cube(await puzzles['3x3x3'].kpuzzle());
-export const generateScramble = async (): Promise<string> => (await randomScrambleForEvent('333')).toString();
+export const generateScramble = async (): Promise<string> => simplifyMoves(movesOf((await randomScrambleForEvent('333')).toString())).join(' ');
