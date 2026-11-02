@@ -6,7 +6,7 @@ import { webcrypto } from 'node:crypto';
 import { deserialize, serialize } from 'node:v8';
 import type { SmartCubeEvent } from 'smartcube-web-bluetooth';
 import type { Solve } from '../engine';
-import { newPersonalBests, personalBestNotifications, sessionStats } from '../storage';
+import { averageDetails, newPersonalBests, numberedSolves, personalBestNotifications, sessionStats } from '../storage';
 import { loadCube, SOLVED, Cube, inverse, isMove, movesOf, locations, sameAxis, simplifyMoves } from '../puzzle';
 
 const cube = await loadCube();
@@ -30,13 +30,16 @@ await jest.unstable_mockModule('../bluetooth', () => ({ BluetoothCube: class {
 } }));
 await jest.unstable_mockModule('../storage', () => ({
   saveSolves: save, readSolves: async () => recovered, backupJSON: () => '', validateBackup: () => recovered,
-  cubeastCSV: () => '', newPersonalBests, personalBestNotifications, sessionStats, turns: (solve: Solve) => solve.moves.length,
+  cubeastCSV: () => '', averageDetails, newPersonalBests, numberedSolves, personalBestNotifications, sessionStats, turns: (solve: Solve) => solve.moves.length,
   formatTime: (ms: number, precision: 2 | 3 = 2) => (ms / 1000).toFixed(precision),
 }));
 await jest.unstable_mockModule('../CubeView', () => ({
   CubeView: ({ facelets }: { facelets: string }) => createElement('div', { role: 'img', 'aria-label': 'Live 3x3 cube state', 'data-facelets': facelets }),
 }));
-await jest.unstable_mockModule('../Replay', () => ({ Replay: () => null }));
+await jest.unstable_mockModule('../Replay', () => ({
+  Replay: ({ solve, close }: { solve: Solve; close: () => void }) => createElement('div', { 'aria-label': 'Solve replay', 'data-solve-id': solve.id },
+    createElement('button', { onClick: close }, 'Close replay')),
+}));
 const { default: App } = await import('../App');
 
 let root: Root, container: HTMLDivElement, resolveNext: (scramble: string) => void, rejectNext: (error: Error) => void;
@@ -46,6 +49,7 @@ beforeEach(async () => {
   localStorage.removeItem('timer-time-precision');
   localStorage.removeItem('timer-over-turn-penalty');
   localStorage.removeItem('timer-pb-daily-records');
+  localStorage.removeItem('timer-show-every-long-pb');
   localStorage.removeItem('timer-hide-distracting-visuals');
   Object.defineProperty(globalThis, 'IS_REACT_ACT_ENVIRONMENT', { configurable: true, value: true });
   Object.defineProperty(globalThis, 'structuredClone', { configurable: true, value: <T>(value: T): T => deserialize(serialize(value)) as T });
@@ -131,17 +135,41 @@ test('new PB celebrations wait for the penalty window and stay until dismissed w
   expect(container.querySelector('[aria-label="Personal best"]')).toBeNull();
 });
 
-test('one celebration reports a new single and average together', async () => {
+test('simultaneous PBs have separate clickable notifications and dismissal does not open details', async () => {
   const previous = [12000, 14000, 16000, 18000, 20000].map((duration, i) => historySolve(5 - i, duration, 2));
   await timedApp(previous);
   await finishFirst();
   await act(async () => jest.advanceTimersByTime(501));
-  const celebration = container.querySelector('[aria-label="Personal best"]')!;
-  expect(celebration.textContent).toContain('New personal bests!');
-  expect(celebration.textContent).toContain('Single: 0.60s / Ao5: 14.00s');
+  const celebrations = container.querySelectorAll('[aria-label="Personal best"]');
+  expect(celebrations).toHaveLength(2);
+  expect(celebrations[0].textContent).toContain('Single: 0.60s');
+  expect(celebrations[1].textContent).toContain('Ao5: 14.00s');
+  await click('View PB Single');
+  expect(container.querySelector('[aria-label="Solve replay"]')?.getAttribute('data-solve-id')).toBe(save.mock.calls.at(-1)![0][0].id);
+  await click('Close replay');
+  await click('Dismiss personal best');
+  expect(container.querySelector('[aria-label="Solve replay"]')).toBeNull();
+  expect(container.querySelector('[aria-label="Personal best"]')?.textContent).toContain('Ao5:');
+  await click('View PB Ao5');
+  expect(container.querySelector<HTMLDialogElement>('.average-dialog')?.open).toBe(true);
+  const rows = container.querySelectorAll('[aria-label="Average solves"] tbody tr');
+  expect(Array.from(container.querySelectorAll('[aria-label="Average solves"] thead th'), cell => cell.textContent)).toEqual(['Solve', 'Time', 'View']);
+  expect(Array.from(rows, row => row.children[0].textContent)).toEqual(['2', '3', '4', '5', '6']);
+  expect(Array.from(rows, row => row.children[1].textContent)).toEqual(['(18.00s)', '16.00s', '14.00s', '12.00s', '(0.60s)']);
+  expect(rows[0].querySelector('s')?.className).toBe('average-trimmed-worst');
+  expect(rows[4].querySelector('s')?.className).toBe('average-trimmed-best');
+  await click('View average solve 6');
+  expect(container.querySelector('[aria-label="Solve replay"]')?.getAttribute('data-solve-id')).toBe(save.mock.calls.at(-1)![0][0].id);
+  await click('Close replay');
+  expect(container.querySelector<HTMLDialogElement>('.average-dialog')?.open).toBe(true);
+  await act(async () => container.querySelector('.average-dialog')!.dispatchEvent(new Event('cancel', { bubbles: true, cancelable: true })));
+  expect(container.querySelector('.average-dialog')).toBeNull();
+  await click('Dismiss personal best');
+  expect(container.querySelector('[aria-label="Personal best"]')).toBeNull();
+  expect(container.querySelector('.average-dialog')).toBeNull();
 });
 
-test('successive short PBs queue until dismissal, while long-average notices reset at local midnight', async () => {
+test('successive PBs stay separately visible, while long-average notices reset at local midnight', async () => {
   const previous = Array.from({ length: 999 }, (_, i) => historySolve(999 - i, 10000 + i * 1000, 2));
   await timedApp(previous);
   jest.setSystemTime(new Date(2026, 10, 1, 23, 59, 30));
@@ -149,34 +177,35 @@ test('successive short PBs queue until dismissal, while long-average notices res
   await act(async () => jest.advanceTimersByTime(501));
   expect(container.querySelector('[aria-label="Personal best"]')?.textContent).toContain('Single: 0.60s');
   for (const name of ['Ao5', 'Ao12', 'Ao100', 'Ao1000']) {
-    expect(container.querySelector('[aria-label="Personal best"]')?.textContent).toContain(`${name}:`);
+    expect(container.querySelector('[aria-label="Personal best notifications"]')?.textContent).toContain(`${name}:`);
   }
+  expect(container.querySelectorAll('[aria-label="Personal best"]')).toHaveLength(5);
   await act(async () => resolveNext('F L2'));
   await act(async () => { move('F', 2000); move('L2', 2100); move('L2', 2200); move("F'", 2400); });
   await act(async () => jest.advanceTimersByTime(501));
   expect(container.querySelector('[aria-label="Personal best"]')?.textContent).toContain('Single: 0.60s');
   await act(async () => jest.advanceTimersByTime(60000));
   expect(container.querySelector('[aria-label="Personal best"]')?.textContent).toContain('Single: 0.60s');
-  await click('Dismiss personal best');
-  const second = container.querySelector('[aria-label="Personal best"]')!;
+  const notices = container.querySelectorAll('[aria-label="Personal best"]');
+  expect(notices).toHaveLength(8);
+  const second = notices[5];
   expect(second.textContent).toContain('Single: 0.20s');
-  expect(second.textContent).toContain('Ao5:');
-  expect(second.textContent).toContain('Ao12:');
-  expect(second.textContent).not.toContain('Ao100:');
-  expect(second.textContent).not.toContain('Ao1000:');
+  expect(notices[6].textContent).toContain('Ao5:');
+  expect(notices[7].textContent).toContain('Ao12:');
   expect(JSON.parse(localStorage.getItem('timer-pb-daily-records')!)).toEqual({ date: '2026-11-01', records: ['Ao100', 'Ao1000'] });
 
   jest.setSystemTime(new Date(2026, 10, 2, 0, 0, 1));
   await act(async () => { move('B', 3000); move('R2', 3100); move('R2', 3200); move("B'", 3300); });
   await act(async () => jest.advanceTimersByTime(501));
-  expect(container.querySelector('[aria-label="Personal best"]')).toBe(second);
-  await click('Dismiss personal best');
-  const third = container.querySelector('[aria-label="Personal best"]')!;
+  const allNotices = container.querySelectorAll('[aria-label="Personal best"]');
+  expect(allNotices).toHaveLength(13);
+  expect(allNotices[5]).toBe(second);
+  const third = allNotices[8];
   expect(third.textContent).toContain('Single: 0.10s');
-  expect(third.textContent).toContain('Ao100:');
-  expect(third.textContent).toContain('Ao1000:');
+  expect(allNotices[11].textContent).toContain('Ao100:');
+  expect(allNotices[12].textContent).toContain('Ao1000:');
   expect(JSON.parse(localStorage.getItem('timer-pb-daily-records')!)).toEqual({ date: '2026-11-02', records: ['Ao100', 'Ao1000'] });
-  await click('Dismiss personal best');
+  while (container.querySelector('[aria-label="Personal best"]')) await click('Dismiss personal best');
   expect(container.querySelector('[aria-label="Personal best"]')).toBeNull();
 });
 
@@ -191,12 +220,64 @@ test.each([
   localStorage.setItem('timer-pb-daily-records', saved);
   await finishFirst();
   await act(async () => jest.advanceTimersByTime(501));
-  const text = container.querySelector('[aria-label="Personal best"]')!.textContent!;
+  const text = container.querySelector('[aria-label="Personal best notifications"]')!.textContent!;
   expect(text).toContain('Single: 0.60s');
   expect(text).toContain('Ao5:');
   expect(text).toContain('Ao12:');
   expect(text.includes('Ao100:')).toBe(ao100);
   expect(text.includes('Ao1000:')).toBe(ao1000);
+});
+
+test('every-long-average PB option defaults off, applies immediately and retains daily limits when disabled', async () => {
+  await timedApp(Array.from({ length: 999 }, (_, i) => historySolve(999 - i, 10000 + i * 1000, 2)));
+  jest.setSystemTime(new Date(2026, 10, 1, 12));
+  await click('Options');
+  const setting = container.querySelector<HTMLInputElement>('input[aria-describedby="long-pb-notifications-help"]')!;
+  expect(setting.checked).toBe(false);
+  await act(async () => setting.click());
+  expect(localStorage.getItem('timer-show-every-long-pb')).toBe('true');
+  await finishFirst();
+  await act(async () => jest.advanceTimersByTime(501));
+  await act(async () => resolveNext('F L2'));
+  await act(async () => { move('F', 2000); move('L2', 2100); move('L2', 2200); move("F'", 2400); });
+  await act(async () => jest.advanceTimersByTime(501));
+  for (const name of ['Ao100', 'Ao1000']) expect(container.querySelectorAll(`[aria-label="View PB ${name}"]`)).toHaveLength(2);
+  await act(async () => setting.click());
+  expect(localStorage.getItem('timer-show-every-long-pb')).toBe('false');
+  await act(async () => { move('B', 3000); move('R2', 3100); move('R2', 3200); move("B'", 3300); });
+  await act(async () => jest.advanceTimersByTime(501));
+  for (const name of ['Ao100', 'Ao1000']) expect(container.querySelectorAll(`[aria-label="View PB ${name}"]`)).toHaveLength(2);
+  expect(container.querySelectorAll('[aria-label="View PB Single"]')).toHaveLength(3);
+});
+
+test('saved every-long-average PB preference restores and overrides an already-used daily ledger', async () => {
+  localStorage.setItem('timer-show-every-long-pb', 'true');
+  await timedApp(Array.from({ length: 999 }, (_, i) => historySolve(999 - i, 10000 + i * 1000, 2)));
+  jest.setSystemTime(new Date(2026, 10, 1, 12));
+  localStorage.setItem('timer-pb-daily-records', '{"date":"2026-11-01","records":["Ao100","Ao1000"]}');
+  await click('Options');
+  expect(container.querySelector<HTMLInputElement>('input[aria-describedby="long-pb-notifications-help"]')!.checked).toBe(true);
+  await finishFirst();
+  await act(async () => jest.advanceTimersByTime(501));
+  for (const name of ['Ao100', 'Ao1000']) expect(container.querySelector(`[aria-label="View PB ${name}"]`)).not.toBeNull();
+});
+
+test('blocked storage keeps long-average PBs daily by default but still allows showing every PB', async () => {
+  jest.spyOn(Storage.prototype, 'getItem').mockImplementation(() => { throw new Error('Blocked'); });
+  jest.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('Blocked'); });
+  await timedApp(Array.from({ length: 999 }, (_, i) => historySolve(999 - i, 10000 + i * 1000, 2)));
+  await click('Options');
+  const setting = container.querySelector<HTMLInputElement>('input[aria-describedby="long-pb-notifications-help"]')!;
+  expect(setting.checked).toBe(false);
+  await finishFirst();
+  await act(async () => jest.advanceTimersByTime(501));
+  await act(async () => setting.click());
+  expect(setting.checked).toBe(true);
+  expect(container.querySelector('.options-dialog')?.textContent).toContain('PB notification preference changed');
+  await act(async () => resolveNext('F L2'));
+  await act(async () => { move('F', 2000); move('L2', 2100); move('L2', 2200); move("F'", 2400); });
+  await act(async () => jest.advanceTimersByTime(501));
+  for (const name of ['Ao100', 'Ao1000']) expect(container.querySelectorAll(`[aria-label="View PB ${name}"]`)).toHaveLength(2);
 });
 
 test.each([1000, 3000])('penalty updates are included before comparing a solve against a %s ms PB', async previous => {
@@ -225,6 +306,84 @@ test('loading existing records does not replay PB celebrations', async () => {
   await timedApp([historySolve(1, 1000, 2)]);
   await act(async () => jest.advanceTimersByTime(5000));
   expect(container.querySelector('[aria-label="Personal best"]')).toBeNull();
+});
+
+test('a slower newest Ao12 does not notify for a historical floating-point PB', async () => {
+  const durations = [11061.2, 11049.64, 12629.46, 12904.71, 13730.08, 11337.38, 12487.66, 12645.04, 12788.3, 13350.35, 11119.56, 11000];
+  await timedApp(durations.map((duration, i) => historySolve(12 - i, duration, 2)));
+  await click('Connect cube');
+  await act(async () => { move('R', 100); move('U2', 200); move('U2', 300); move("R'", 15300); });
+  await act(async () => jest.advanceTimersByTime(501));
+  expect(container.querySelector('[aria-label="Personal best"]')).toBeNull();
+  expect(container.querySelector('[aria-label="View current Ao12"]')?.textContent).toBe('12.41');
+  expect(container.querySelector('[aria-label="View best Ao12"]')?.textContent).toBe('12.14');
+});
+
+test('average PB notifications retain their original window after later solves and session changes', async () => {
+  await timedApp([12000, 14000, 16000, 18000, 20000].map((duration, i) => historySolve(5 - i, duration, 2)));
+  await finishFirst();
+  await act(async () => jest.advanceTimersByTime(501));
+  await act(async () => resolveNext('F L2'));
+  await act(async () => { move('F', 2000); move('L2', 2100); move('L2', 2200); move("F'", 2400); });
+  await act(async () => jest.advanceTimersByTime(501));
+  await click('Options');
+  const session = container.querySelector<HTMLInputElement>('input[maxlength="100"]')!;
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(session, 'Other');
+    session.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await act(async () => container.querySelector<HTMLDialogElement>('.options-dialog')!.close());
+  expect(container.querySelector('[aria-label="View current Ao5"]')).toBeNull();
+  await click('View PB Ao5');
+  expect(container.querySelector('#average-title')?.textContent).toBe('Ao5: 14.00s');
+  const rows = container.querySelectorAll('[aria-label="Average solves"] tbody tr');
+  expect(Array.from(rows, row => row.children[0].textContent)).toEqual(['2', '3', '4', '5', '6']);
+  expect(Array.from(rows, row => row.children[1].textContent)).toEqual(['(18.00s)', '16.00s', '14.00s', '12.00s', '(0.60s)']);
+});
+
+test.each([5, 12, 100, 1000])('current and best Ao%s open their exact windows with the correct number of exclusions', async count => {
+  const solves = Array.from({ length: count + 2 }, (_, i) => historySolve(i + 1, 10000 + i * 100, 2));
+  await showHistory([...solves, historySolve(count + 3, 1, 2, 'Other'), historySolve(count + 4, 1, 2, 'Default', 'incomplete')]);
+  for (const kind of ['current', 'best']) {
+    await click(`View ${kind} Ao${count}`);
+    const rows = container.querySelectorAll('[aria-label="Average solves"] tbody tr');
+    expect(rows).toHaveLength(count);
+    const trim = Math.ceil(count / 20);
+    expect(container.querySelectorAll('.average-trimmed-best')).toHaveLength(trim);
+    expect(container.querySelectorAll('.average-trimmed-worst')).toHaveLength(trim);
+    const start = kind === 'current' ? 2 : 0;
+    expect(Array.from(rows, row => row.children[0].textContent)).toEqual(solves.slice(start, start + count).map(solve => solve.id));
+    expect(Array.from(rows, row => row.children[1].textContent)).toEqual(solves.slice(start, start + count).map((solve, index) => {
+      const time = `${(solve.duration / 1000).toFixed(2)}s`;
+      return index < trim || index >= count - trim ? `(${time})` : time;
+    }));
+    await click(`View average solve ${start + 1}`);
+    expect(container.querySelector('[aria-label="Solve replay"]')?.getAttribute('data-solve-id')).toBe(solves[start].id);
+    await click('Close replay');
+    await click('Close average');
+    expect(container.querySelector('.average-dialog')).toBeNull();
+  }
+}, 15000);
+
+test('average solve numbers match session history across DNFs, active solves and display sorting', async () => {
+  const solves = [
+    historySolve(1, 2000, 2, 'Default', 'incomplete'), historySolve(2, 20000, 2),
+    historySolve(3, 3000, 2, 'Default', 'incomplete'),
+    ...Array.from({ length: 5 }, (_, i) => historySolve(i + 4, 10000 + i * 1000, 2)),
+    { ...historySolve(9, 4000, 2, 'Default', 'incomplete'), createdAt: new Date(Date.UTC(2026, 0, 1, 0, 0, 6, 500)).toISOString() },
+    historySolve(10, 1, 2, 'Default', 'active'), historySolve(11, 1, 2, 'Other'),
+  ];
+  await showHistory(solves);
+  await click('Time');
+  const history = container.querySelectorAll('[aria-label="Solve history"] tbody tr');
+  const expected = Array.from(history).filter(row => /^(10|11|12|13|14)\.00s$/.test(row.children[1].textContent!))
+    .map(row => row.children[0].textContent);
+  expect(expected).toEqual(['4', '5', '6', '8', '9']);
+  await click('View current Ao5');
+  const rows = container.querySelectorAll('[aria-label="Average solves"] tbody tr');
+  expect(Array.from(rows, row => row.children[0].textContent)).toEqual(expected);
+  await click('View average solve 8');
+  expect(container.querySelector('[aria-label="Solve replay"]')?.getAttribute('data-solve-id')).toBe('7');
 });
 
 test.each(['accepted', 'dismissed'] as const)('Options prompts installation once when Chrome offers it (%s)', async outcome => {

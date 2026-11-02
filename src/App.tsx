@@ -3,7 +3,8 @@ import type { SmartCubeEvent } from 'smartcube-web-bluetooth';
 import { BluetoothCube } from './bluetooth';
 import { TimerEngine, solveTime, type Solve } from './engine';
 import { generateScramble, inverse, loadCube, SOLVED, type Cube } from './puzzle';
-import { backupJSON, cubeastCSV, formatTime, newPersonalBests, personalBestNotifications, readSolves, saveSolves, sessionStats, turns, validateBackup } from './storage';
+import { averageDetails, backupJSON, cubeastCSV, formatTime, newPersonalBests, numberedSolves, personalBestNotifications, readSolves, saveSolves, sessionStats, turns, validateBackup } from './storage';
+import { AverageDetails } from './AverageDetails';
 import { CubeView } from './CubeView';
 import { Replay } from './Replay';
 import { SolveTimeline } from './SolveTimeline';
@@ -31,8 +32,8 @@ export default function App() {
   const [, render] = useReducer(n => n + 1, 0);
   const [cube, setCube] = useState<Cube | null>(null);
   const [history, setHistory] = useState<Solve[]>([]);
-  const [celebrations, setCelebrations] = useState<{ id: string; records: { name: string; time: number }[] }[]>([]);
-  const celebration = celebrations[0] ?? null;
+  const [celebrations, setCelebrations] = useState<{ id: string; name: string; time: number; solve: Solve; average: ReturnType<typeof averageDetails> }[]>([]);
+  const [average, setAverage] = useState<ReturnType<typeof averageDetails>>(null);
   const [historySort, setHistorySort] = useState<{ column: HistoryColumn; direction: 'ascending' | 'descending' }>({ column: 'number', direction: 'descending' });
   const [error, setError] = useState('');
   const [storage, setStorage] = useState('Loading local history...');
@@ -44,6 +45,7 @@ export default function App() {
   const [mac, setMac] = useState(() => { try { return localStorage.getItem('timer-last-cube-mac') ?? ''; } catch { return ''; } });
   const [precision, setPrecision] = useState<2 | 3>(() => { try { return localStorage.getItem('timer-time-precision') === '3' ? 3 : 2; } catch { return 2; } });
   const [overTurnPenalty, setOverTurnPenalty] = useState(() => { try { return localStorage.getItem('timer-over-turn-penalty') !== 'false'; } catch { return true; } });
+  const [showEveryLongPb, setShowEveryLongPb] = useState(() => { try { return localStorage.getItem('timer-show-every-long-pb') === 'true'; } catch { return false; } });
   const [hiddenVisuals, setHiddenVisuals] = useState<HiddenVisuals>(() => {
     try {
       const value = JSON.parse(localStorage.getItem('timer-hide-distracting-visuals') ?? 'false') as Partial<HiddenVisuals> | boolean | null;
@@ -74,6 +76,8 @@ export default function App() {
   sessionRef.current = session;
   const overTurnPenaltyRef = useRef(overTurnPenalty);
   overTurnPenaltyRef.current = overTurnPenalty;
+  const showEveryLongPbRef = useRef(showEveryLongPb);
+  showEveryLongPbRef.current = showEveryLongPb;
 
   useEffect(() => {
     if (installed) return;
@@ -108,7 +112,7 @@ export default function App() {
         saved.records.forEach(name => { if (name === 'Ao100' || name === 'Ao1000') shown.add(name); });
       }
     } catch { /* Keep the in-memory daily limit when storage is blocked. */ }
-    const eligible = personalBestNotifications(records, shown);
+    const eligible = personalBestNotifications(records, shown, showEveryLongPbRef.current);
     dailyRecords.current = { date, records: [...shown] };
     try { localStorage.setItem('timer-pb-daily-records', JSON.stringify(dailyRecords.current)); } catch { /* The daily limit still applies until this page is closed. */ }
     return eligible;
@@ -126,13 +130,20 @@ export default function App() {
           recordChecks.current.delete(copy.id);
           if (!candidate) return;
           const records = notificationRecords(newPersonalBests(candidate.previous, candidate.solve));
-          if (records.length) setCelebrations(current => [...current, { id: copy.id, records }]);
+          if (records.length) {
+            const solves = [candidate.solve, ...candidate.previous.filter(item => item.session === candidate.solve.session && item.id !== copy.id)
+              .sort((a, b) => b.createdAt.localeCompare(a.createdAt))];
+            setCelebrations(current => [...current, ...records.map(record => ({
+              ...record, id: `${copy.id}-${record.name}`, solve: candidate.solve,
+              average: record.name === 'Single' ? null : averageDetails(solves, Number(record.name.slice(2))),
+            }))]);
+          }
         }, Math.max(0, 501 - (performance.now() - (copy.moves.at(-1)?.hostTime ?? performance.now()))));
         recordChecks.current.set(copy.id, { solve: copy, previous, timeout });
       }
     } else if (copy.status === 'incomplete') {
       if (check) { clearTimeout(check.timeout); recordChecks.current.delete(copy.id); }
-      setCelebrations(current => current.filter(item => item.id !== copy.id));
+      setCelebrations(current => current.filter(item => item.solve.id !== copy.id));
     }
     pending.current++;
     setStorage('Saving locally...');
@@ -261,6 +272,11 @@ export default function App() {
     catch { setError('Penalty preference changed, but this browser could not save the preference.'); }
   }
   function changeHiddenVisuals(value: HiddenVisuals) { setHiddenVisuals(value); try { localStorage.setItem('timer-hide-distracting-visuals', JSON.stringify(value)); } catch { setError('Visual preference changed, but this browser could not save the preference.'); } }
+  function changeLongPbNotifications(value: boolean) {
+    setShowEveryLongPb(value); showEveryLongPbRef.current = value;
+    try { localStorage.setItem('timer-show-every-long-pb', String(value)); }
+    catch { setError('PB notification preference changed, but this browser could not save the preference.'); }
+  }
 
   async function resynchronize() {
     const timer = engine.current; if (!timer || resynchronizing.current) return;
@@ -304,9 +320,9 @@ export default function App() {
     return { filtered, statistics: sessionStats(filtered) };
   }, [history, session]);
   const historyRows = useMemo(() => {
-    const rows = [...filtered].sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt) || a.id.localeCompare(b.id)).map((solve, index) => {
+    const rows = numberedSolves(filtered).map(({ solve, number }) => {
       const count = turns(solve);
-      return { solve, number: index + 1, duration: solveTime(solve), turns: count, tps: solve.duration > 0 ? count * 1000 / solve.duration : null };
+      return { solve, number, duration: solveTime(solve), turns: count, tps: solve.duration > 0 ? count * 1000 / solve.duration : null };
     });
     return rows.sort((a, b) => {
       const left = a[historySort.column], right = b[historySort.column];
@@ -346,6 +362,8 @@ export default function App() {
       <label className="d-block">Time precision<select aria-label="Time precision" className="form-select mt-2" value={precision} onChange={event => changePrecision(event.target.value === '3' ? 3 : 2)}><option value="2">Hundredths (0.00)</option><option value="3">Thousandths (0.000)</option></select></label>
       <label className="form-check mt-3"><input type="checkbox" className="form-check-input" checked={overTurnPenalty} aria-describedby="over-turn-penalty-help" onChange={event => changeOverTurnPenalty(event.target.checked)} /><span className="form-check-label">Extra-turn +2 penalty</span></label>
       <p id="over-turn-penalty-help" className="small text-secondary mt-2 mb-0">Apply +2 for an extra turn within 0.5 seconds after finishing.</p>
+      <label className="form-check mt-3"><input type="checkbox" className="form-check-input" checked={showEveryLongPb} aria-describedby="long-pb-notifications-help" onChange={event => changeLongPbNotifications(event.target.checked)} /><span className="form-check-label">Notify for every Ao100/Ao1000 PB</span></label>
+      <p id="long-pb-notifications-help" className="small text-secondary mt-2 mb-0">When off, show each of these PB notifications at most once per day.</p>
       <details className="mt-3">
         <summary className="visuals-summary d-flex align-items-center gap-2">
           <input type="checkbox" className="form-check-input m-0" aria-labelledby="hide-visuals-title" aria-describedby="hide-visuals-help" checked={allVisualsHidden} ref={element => { if (element) element.indeterminate = someVisualsHidden && !allVisualsHidden; }} onClick={event => event.stopPropagation()} onChange={event => changeHiddenVisuals({ timer: event.target.checked, cube: event.target.checked, progressBar: event.target.checked })} />
@@ -368,7 +386,7 @@ export default function App() {
         <form onSubmit={event => { event.preventDefault(); if (canConnect) { optionsDialog.current?.close(); connect(); } }}><label className="d-block">Bluetooth MAC (only if needed)<input className="form-control mt-2" placeholder="AA:BB:CC:DD:EE:FF" value={mac} disabled={connecting} onChange={event => setMac(event.target.value)} /></label></form>
         <a className="d-inline-block mt-2" href="help/mac-address.html" target="_blank" rel="noopener noreferrer">Find my cube's MAC address</a>
       </div>}
-      {(error.startsWith('Time precision changed') || error.startsWith('Visual preference changed') || error.startsWith('Penalty preference changed')) && <p role="alert" className="text-warning mt-3 mb-0">{error}</p>}
+      {(error.startsWith('Time precision changed') || error.startsWith('Visual preference changed') || error.startsWith('Penalty preference changed') || error.startsWith('PB notification preference changed')) && <p role="alert" className="text-warning mt-3 mb-0">{error}</p>}
       <form method="dialog" className="text-end mt-4"><button className="btn btn-primary">Done</button></form>
     </dialog>
     {(!navigator.bluetooth || !window.isSecureContext) && <p className="alert alert-info">Bluetooth needs a supported browser and HTTPS or localhost. Try Chrome/Edge on Windows.</p>}
@@ -434,7 +452,10 @@ export default function App() {
       <div className="table-responsive">
         <table className="table table-sm" aria-label="Session statistics"><thead><tr><th scope="col">Metric</th><th scope="col">Current</th><th scope="col">Best</th></tr></thead>
           <tbody>{statistics.map(stat => <tr key={stat.name}><th scope="row">{stat.name}</th>
-            <td>{stat.current === 'DNF' ? 'DNF' : stat.current === null ? '--' : formatTime(stat.current, precision)}</td><td>{stat.best === null ? '--' : formatTime(stat.best, precision)}</td>
+            {(['current', 'best'] as const).map(kind => <td key={kind}>{stat[kind] === 'DNF' ? 'DNF' : stat[kind] === null ? '--' :
+              stat.name === 'Single' ? formatTime(stat[kind] as number, precision) :
+                <button className="stat-link" aria-label={`View ${kind} ${stat.name}`} onClick={() => setAverage(averageDetails(filtered, Number(stat.name.slice(2)), kind === 'best'))}>{formatTime(stat[kind] as number, precision)}</button>}
+            </td>)}
           </tr>)}</tbody>
         </table>
       </div>
@@ -459,24 +480,30 @@ export default function App() {
       </table></div>
       {!filtered.length && <p className="text-secondary">No solves in this session yet. Your data stays on this device.</p>}
     </section>
+    {average && <AverageDetails details={average} history={history} precision={precision} view={setReplay} close={() => setAverage(null)} />}
     {cube && replay && <Replay key={replay.id} cube={cube} solve={replay} precision={precision} close={() => setReplay(null)} />}
-    {celebration && <div key={`pb-${celebration.id}`} className="pb-celebration" role="status" aria-label="Personal best">
+    {!!celebrations.length && <div className="pb-notifications" aria-label="Personal best notifications">{celebrations.map(celebration => <div key={celebration.id} className="pb-celebration" role="status" aria-label="Personal best">
+      <button className="pb-open" aria-label={`View PB ${celebration.name}`} onClick={() => {
+        if (celebration.average) setAverage(celebration.average);
+        else setReplay(celebration.solve);
+      }}>
       <svg width="52" height="64" viewBox="0 0 64 80" aria-hidden="true" focusable="false">
-        <defs><pattern id="pb-disco-tiles" width="12" height="12" patternUnits="userSpaceOnUse">
+        <defs><pattern id={`pb-disco-tiles-${celebration.id}`} width="12" height="12" patternUnits="userSpaceOnUse">
           <path d="M0 0h12v12H0z" fill="#c8ddf5" /><path d="M0 0h6v6H0zM6 6h6v6H6z" fill="#7d8dba" />
           <path d="M0 6h6v6H0z" fill="#b695ef" /><path d="M0 0h12v12H0zM6 0v12M0 6h12" fill="none" stroke="#181f2d" strokeWidth="0.7" />
         </pattern></defs>
         <path d="M32 0v16" stroke="#c8ddf5" strokeWidth="2" />
-        <g className="pb-disco-ball"><circle cx="32" cy="40" r="24" fill="url(#pb-disco-tiles)" stroke="#e8edf5" />
+        <g className="pb-disco-ball"><circle cx="32" cy="40" r="24" fill={`url(#pb-disco-tiles-${celebration.id})`} stroke="#e8edf5" />
           <path d="M21 20c-7 12-7 28 0 40M43 20c7 12 7 28 0 40" fill="none" stroke="#e8edf5" opacity="0.6" /></g>
         <path className="pb-sparkles" d="M9 12v10M4 17h10M56 59v10M51 64h10" fill="none" stroke="#f5b942" strokeWidth="2" />
       </svg>
-      <div><strong>{celebration.records.length === 1 ? 'New personal best!' : 'New personal bests!'}</strong>
-        <div>{celebration.records.map(record => `${record.name}: ${formatTime(record.time, precision)}s`).join(' / ')}</div>
-      </div>
+      <span><strong>New personal best!</strong>
+        <span className="d-block">{celebration.name}: {formatTime(celebration.time, precision)}s</span>
+      </span>
+      </button>
       <button className="btn btn-sm btn-outline-light pb-dismiss" aria-label="Dismiss personal best"
         onClick={() => setCelebrations(current => current.filter(item => item.id !== celebration.id))}>Dismiss</button>
-    </div>}
-    <footer className="text-secondary small mt-4">Browser-only. No API, backend, accounts, or uploads. Export backups before clearing browser data. Version 0.2.3.</footer>
+    </div>)}</div>}
+    <footer className="text-secondary small mt-4">Browser-only. No API, backend, accounts, or uploads. Export backups before clearing browser data. Version 0.2.4.</footer>
   </main>;
 }

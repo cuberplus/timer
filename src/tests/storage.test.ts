@@ -1,7 +1,7 @@
 import 'fake-indexeddb/auto';
 import { TimerEngine, type Solve } from '../engine';
 import { Cube, loadCube, SOLVED } from '../puzzle';
-import { average, backupJSON, cubeastCSV, newPersonalBests, personalBestNotifications, readSolves, saveSolves, sessionStats, turns, validateBackup } from '../storage';
+import { average, averageDetails, backupJSON, cubeastCSV, newPersonalBests, personalBestNotifications, readSolves, saveSolves, sessionStats, turns, validateBackup } from '../storage';
 
 let cube: Cube;
 beforeAll(async () => { cube = await loadCube(); });
@@ -135,6 +135,73 @@ test('PB detection respects session boundaries, penalties, ties and incomplete a
   expect(newPersonalBests(previous, { ...seed, session: 'Other', duration: 20000 })).toEqual([{ name: 'Single', time: 20000 }]);
 });
 
+test('a slower newest Ao12 does not re-celebrate an unchanged historical PB due to rounding drift', () => {
+  const seed = sample();
+  const previous = [11061.2, 11049.64, 12629.46, 12904.71, 13730.08, 11337.38, 12487.66, 12645.04, 12788.3, 13350.35, 11119.56, 11000]
+    .map((duration, i) => ({ ...seed, id: `previous-${i}`, duration, createdAt: new Date(Date.UTC(2026, 0, 1, 0, 0, 12 - i)).toISOString() }));
+  const solve = { ...seed, duration: 15000 };
+  expect(average(previous, 12)).toBeCloseTo(12137.33, 7);
+  expect(average([solve, ...previous], 12)).toBeCloseTo(12405.374, 7);
+  expect(newPersonalBests(previous, solve)).toEqual([]);
+});
+
+test('newest-window PB comparison ignores floating-point ties but preserves real fractional improvements', () => {
+  const seed = sample();
+  const previous = Array.from({ length: 12 }, (_, i) => ({ ...seed, id: `previous-${i}`, duration: 12000.1 }));
+  expect(newPersonalBests(previous, { ...seed, duration: 12000.1 - 1e-9 })).toEqual([]);
+  const varied = previous.map((solve, i) => ({ ...solve, duration: i === 0 ? 11000 : i === 1 ? 13000 : solve.duration }));
+  const improved = newPersonalBests(varied, { ...seed, duration: 12000.09 });
+  expect(improved.map(record => record.name)).toEqual(['Ao5', 'Ao12']);
+  expect(improved.find(record => record.name === 'Ao12')!.time).toBeCloseTo(12000.099, 7);
+});
+
+test('PB checks read older solve times only for previous records, not for the newest windows', () => {
+  const seed = sample();
+  const previous = Array.from({ length: 1200 }, (_, i) => ({
+    ...seed, id: `previous-${i}`, duration: 10000, createdAt: new Date(Date.UTC(2026, 0, 1) + i * 1000).toISOString(),
+  }));
+  let reads = 0;
+  Object.defineProperty(previous[0], 'duration', { get: () => { reads++; return 10000; } });
+  expect(newPersonalBests(previous, { ...seed, duration: 9000 })).toEqual([{ name: 'Single', time: 9000 }]);
+  expect(reads).toBe(1);
+});
+
+test('current average details do not read times outside the newest completed window', () => {
+  const seed = sample(), older = { ...seed, id: 'older' };
+  let reads = 0;
+  Object.defineProperty(older, 'duration', { get: () => { reads++; return 1; } });
+  const recent = Array.from({ length: 5 }, (_, i) => ({ ...seed, id: `recent-${i}`, duration: 10000 }));
+  expect(averageDetails([{ ...seed, status: 'incomplete' }, ...recent, older], 5)!.time).toBe(10000);
+  expect(reads).toBe(0);
+});
+
+test('average details select the current or best window and identify trimmed solves including penalties', () => {
+  const seed = sample();
+  const solves = [20000, 10000, 9000, 8000, 7000, 6000, 5000].map((duration, i) => ({ ...seed, id: String(i), duration }));
+  const current = averageDetails([{ ...seed, status: 'incomplete' }, ...solves], 5)!;
+  expect(current.time).toBe(9000);
+  expect(current.solves.map(item => [item.solve.id, item.trimmed])).toEqual([
+    ['4', 'best'], ['3', null], ['2', null], ['1', null], ['0', 'worst'],
+  ]);
+  const best = averageDetails(solves, 5, true)!;
+  expect(best.time).toBe(7000);
+  expect(best.solves.map(item => item.solve.id)).toEqual(['6', '5', '4', '3', '2']);
+  const penalized = averageDetails([solves[0], solves[1], solves[2], solves[3], { ...solves[4], penalty: 2000 }], 5)!;
+  expect(penalized.time).toBeCloseTo(28000 / 3, 7);
+  expect(penalized.solves.find(item => item.trimmed === 'best')!.solve.id).toBe('3');
+  expect(averageDetails(solves.slice(0, 4), 5)).toBeNull();
+});
+
+test.each([5, 12, 100, 1000])('Ao%s details exclude exactly five percent at each end, even when all solves tie', count => {
+  const seed = sample();
+  const solves = Array.from({ length: count }, (_, i) => ({ ...seed, id: String(i), duration: 10000 }));
+  const details = averageDetails(solves, count, true)!;
+  expect(details.solves).toHaveLength(count);
+  expect(details.time).toBe(10000);
+  for (const trimmed of ['best', 'worst']) expect(details.solves.filter(item => item.trimmed === trimmed)).toHaveLength(Math.ceil(count / 20));
+  expect(details.solves.filter(item => item.trimmed === null)).toHaveLength(count - 2 * Math.ceil(count / 20));
+});
+
 test('every short PB is eligible, while each long-average PB is eligible only once per daily ledger', () => {
   const records = ['Single', 'Ao5', 'Ao12', 'Ao100', 'Ao1000'].map(name => ({ name, time: 10000 }));
   const shown = new Set<string>();
@@ -143,6 +210,14 @@ test('every short PB is eligible, while each long-average PB is eligible only on
   expect(personalBestNotifications(records, shown).map(record => record.name)).toEqual(['Single', 'Ao5', 'Ao12']);
   expect(personalBestNotifications(records, new Set(['Ao100'])).map(record => record.name)).toEqual(['Single', 'Ao5', 'Ao12', 'Ao1000']);
   expect(personalBestNotifications(records, new Set())).toEqual(records);
+});
+
+test('every long-average PB can be shown without losing the daily ledger when the option is turned off', () => {
+  const records = ['Single', 'Ao5', 'Ao12', 'Ao100', 'Ao1000'].map(name => ({ name, time: 10000 }));
+  const shown = new Set<string>();
+  expect(personalBestNotifications(records, shown, true)).toEqual(records);
+  expect(personalBestNotifications(records, shown, true)).toEqual(records);
+  expect(personalBestNotifications(records, shown, false).map(record => record.name)).toEqual(['Single', 'Ao5', 'Ao12']);
 });
 
 test('current and best singles respect the latest attempt while averages exclude unfinished recordings', () => {

@@ -1,6 +1,7 @@
 import { test, expect, type Locator, type Page } from '@playwright/test';
 import type { TwistyPlayer } from 'cubing/twisty';
-import type { Solve } from '../src/engine';
+import { TimerEngine, type Solve } from '../src/engine';
+import { loadCube, SOLVED } from '../src/puzzle';
 
 async function expectAnimatedTurn(button: Locator, visualizer: string) {
   const animated = await button.evaluate(async (element, selector) => {
@@ -30,6 +31,119 @@ function storedSolves(page: Page): Promise<Solve[]> {
     };
   }));
 }
+
+async function averageSeed(): Promise<Solve> {
+  const cube = await loadCube(), timer = new TimerEngine(cube, () => {}, () => {});
+  timer.connect('Test cube'); timer.synchronize(SOLVED); timer.prepare('R U2');
+  ['R', 'U2', 'U2', "R'"].forEach((move, i) => timer.turn({ move, hostTime: i * 100, localTimestamp: i * 100, cubeTimestamp: null }));
+  return timer.result!;
+}
+
+test('PB notifications stack without overlap and open their own single or average details', async ({ page }) => {
+  const seed = await averageSeed();
+  const solves = Array.from({ length: 11 }, (_, i) => ({
+    ...seed, id: `pb-seed-${i}`, duration: 41000 - i * 1000, createdAt: new Date(Date.UTC(2020, 0, 1, 0, 0, i)).toISOString(),
+  }));
+  await page.goto('');
+  const simulator = page.getByText('Try simulated cube', { exact: true });
+  await expect(simulator).toBeEnabled();
+  await page.locator('input[type=file]').setInputFiles({
+    name: 'pb-seeds.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify({ format: 'timer-v1', solves })),
+  });
+  await expect(page.getByRole('table', { name: 'Solve history' }).locator('tbody tr')).toHaveCount(11);
+  await simulator.evaluate(button => (button as HTMLButtonElement).click());
+  const guided = page.getByRole('button', { name: 'Perform guided move', exact: true });
+  await expect(guided).toBeEnabled({ timeout: 45000 });
+  for (let i = 0; i < 60; i++) {
+    if (await page.getByRole('button', { name: 'Simulate solve', exact: true }).isEnabled()) break;
+    await guided.click();
+  }
+  await page.getByRole('button', { name: 'Simulate solve', exact: true }).click();
+  const notices = page.getByRole('status', { name: 'Personal best', exact: true });
+  await expect(notices).toHaveCount(3);
+  for (const width of [1280, 375]) {
+    await page.setViewportSize({ width, height: 900 });
+    const boxes = await notices.evaluateAll(elements => elements.map(element => {
+      const { top, bottom, left, right } = element.getBoundingClientRect();
+      return { top, bottom, left, right };
+    }));
+    expect(boxes.every(box => box.left >= 0 && box.right <= width && box.top >= 0 && box.bottom <= 900)).toBe(true);
+    expect(boxes.every((box, i) => boxes.slice(i + 1).every(other => box.bottom < other.top))).toBe(true);
+  }
+  await page.getByRole('button', { name: 'View PB Single', exact: true }).click({ position: { x: 4, y: 4 } });
+  const replay = page.getByRole('dialog', { name: 'Solve replay', exact: true });
+  await expect(replay).toBeVisible();
+  const latest = (await storedSolves(page)).find(solve => !solve.id.startsWith('pb-seed-'))!;
+  await expect(replay.getByLabel('Solve ID', { exact: true })).toContainText(latest.id);
+  await page.keyboard.press('Escape');
+  await expect(replay).toHaveCount(0);
+  await notices.first().getByRole('button', { name: 'Dismiss personal best', exact: true }).click();
+  await expect(notices).toHaveCount(2);
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await page.getByRole('button', { name: 'View PB Ao12', exact: true }).click();
+  const average = page.locator('.average-dialog');
+  await expect(average).toBeVisible();
+  await expect(average.getByRole('heading')).toHaveText(/^Ao12:/);
+  await expect(average.getByRole('columnheader')).toHaveText(['Solve', 'Time', 'View']);
+  await expect(average.locator('tbody tr')).toHaveCount(12);
+  const best = average.locator('s.average-trimmed-best'), worst = average.locator('s.average-trimmed-worst');
+  await expect(best).toHaveCount(1);
+  await expect(worst).toHaveCount(1);
+  await expect(best).toHaveText(/^\(\d+\.\d{2}s\)$/);
+  await expect(worst).toHaveText(/^\(\d+\.\d{2}s\)$/);
+  await expect(best).toHaveCSS('color', 'rgb(101, 211, 176)');
+  await expect(worst).toHaveCSS('color', 'rgb(255, 123, 134)');
+  await expect(best).toHaveCSS('text-decoration-line', 'line-through');
+  await expect(worst).toHaveCSS('text-decoration-line', 'line-through');
+  await expect(average.locator('tbody tr').last().locator('s')).toHaveClass('average-trimmed-best');
+  await average.getByRole('button', { name: 'View average solve 12', exact: true }).click();
+  await expect(replay).toBeVisible();
+  await expect(replay.getByLabel('Solve ID', { exact: true })).toContainText(latest.id);
+  await page.keyboard.press('Escape');
+  await expect(replay).toHaveCount(0);
+  await expect(average).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(average).toHaveCount(0);
+  const ao5 = page.getByRole('button', { name: 'View PB Ao5', exact: true });
+  await ao5.focus();
+  await page.keyboard.press('Enter');
+  await expect(average.getByRole('heading')).toHaveText(/^Ao5:/);
+  await average.getByRole('button', { name: 'Close average', exact: true }).click();
+});
+
+test('current and best Ao1000 details show all contributing solves and fifty exclusions per end', async ({ page }) => {
+  const seed = await averageSeed();
+  const solves = Array.from({ length: 1002 }, (_, i) => ({
+    ...seed, id: `average-seed-${i}`, duration: 10000 + i * 10, createdAt: new Date(Date.UTC(2020, 0, 1) + i * 1000).toISOString(),
+  }));
+  await page.goto('');
+  await expect(page.getByText('Try simulated cube', { exact: true })).toBeEnabled();
+  await page.locator('input[type=file]').setInputFiles({
+    name: 'averages.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify({ format: 'timer-v1', solves })),
+  });
+  for (const kind of ['current', 'best']) {
+    const button = page.getByRole('button', { name: `View ${kind} Ao1000`, exact: true });
+    await expect(button).toBeVisible();
+    const time = await button.innerText();
+    await button.click();
+    const average = page.locator('.average-dialog');
+    await expect(average.getByRole('heading')).toHaveText(`Ao1000: ${time}s`);
+    await expect(average.locator('tbody tr')).toHaveCount(1000);
+    await expect(average.locator('.average-trimmed-best')).toHaveCount(50);
+    await expect(average.locator('.average-trimmed-worst')).toHaveCount(50);
+    await expect(average.locator('tbody tr:not(:has(s))')).toHaveCount(900);
+    await expect(average.locator('tbody tr').first().getByRole('rowheader')).toHaveText(kind === 'current' ? '3' : '1');
+    await expect(average.locator('tbody tr').last().getByRole('rowheader')).toHaveText(kind === 'current' ? '1002' : '1000');
+    await average.getByRole('button', { name: `View average solve ${kind === 'current' ? 1002 : 1000}`, exact: true }).click();
+    const replay = page.getByRole('dialog', { name: 'Solve replay', exact: true });
+    await expect(replay.getByLabel('Solve ID', { exact: true })).toContainText(kind === 'current' ? 'average-seed-1001' : 'average-seed-999');
+    await replay.getByRole('button', { name: 'Close replay', exact: true }).click();
+    await expect(average).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(average).toHaveCount(0);
+    await expect(button).toBeFocused();
+  }
+});
 
 test('production manifest launches the timer and serves installable app icons', async ({ page }) => {
   await page.goto('');
@@ -278,8 +392,8 @@ test('browser-only scramble, solve, persistence, replay and backup', async ({ pa
   await expect(celebration).toContainText(/Single: \d+\.\d{3}s/);
   await expect(celebration.locator('.pb-disco-ball')).toHaveCSS('animation-duration', '1.4s');
   await expect(celebration.locator('.pb-disco-ball')).toHaveCSS('animation-iteration-count', 'infinite');
-  await expect(celebration).toHaveCSS('position', 'fixed');
-  await expect(celebration).toHaveCSS('pointer-events', 'none');
+  await expect(page.getByLabel('Personal best notifications', { exact: true })).toHaveCSS('position', 'fixed');
+  await expect(celebration).toHaveCSS('pointer-events', 'auto');
   await expect(history.getByRole('columnheader')).toHaveText(['Solve number', 'Time', 'Turns', 'TPS', 'View']);
   for (const [i, name] of ['Cross', 'F2L Pair 1', 'F2L Pair 2', 'F2L Pair 3', 'F2L Pair 4', 'OLL', 'PLL'].entries()) {
     const label = page.locator(`.trail-duration[data-step="${i}"]`);
@@ -489,6 +603,7 @@ test('options use a self-contained responsive dialog with keyboard dismissal and
   await expect(dialog).toBeVisible();
   await expect(dialog.getByLabel('Session', { exact: true })).toHaveValue('Default');
   await expect(dialog.getByLabel('Extra-turn +2 penalty', { exact: true })).toBeChecked();
+  await expect(dialog.getByLabel('Notify for every Ao100/Ao1000 PB', { exact: true })).not.toBeChecked();
   await expect(dialog.getByLabel('Bluetooth MAC (only if needed)', { exact: true })).toBeVisible();
   await expect(dialog.getByRole('link', { name: "Find my cube's MAC address" })).toBeVisible();
   expect(await header.boundingBox()).toEqual(originalHeader);
@@ -500,6 +615,7 @@ test('options use a self-contained responsive dialog with keyboard dismissal and
   await options.click();
   await dialog.getByLabel('Time precision', { exact: true }).selectOption('3');
   await dialog.getByLabel('Extra-turn +2 penalty', { exact: true }).uncheck();
+  await dialog.getByLabel('Notify for every Ao100/Ao1000 PB', { exact: true }).check();
   await dialog.getByRole('button', { name: 'Done', exact: true }).click();
   await expect(dialog).toBeHidden();
   await expect(options).toBeFocused();
@@ -508,6 +624,7 @@ test('options use a self-contained responsive dialog with keyboard dismissal and
   await options.click();
   await expect(dialog.getByLabel('Time precision', { exact: true })).toHaveValue('3');
   await expect(dialog.getByLabel('Extra-turn +2 penalty', { exact: true })).not.toBeChecked();
+  await expect(dialog.getByLabel('Notify for every Ao100/Ao1000 PB', { exact: true })).toBeChecked();
   const box = (await dialog.boundingBox())!;
   expect(box.x).toBeGreaterThanOrEqual(0);
   expect(box.x + box.width).toBeLessThanOrEqual(375);
