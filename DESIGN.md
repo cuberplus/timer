@@ -95,12 +95,14 @@ was saved if its transaction failed. Export/import validates the complete schema
 and preserves data without a backend. Imports merge by identifier.
 
 Statistics include current/best Single, Ao5, Ao12, Ao100, and Ao1000, plus move
-count and TPS. Best averages examine every rolling completed-solve window in the
+count and TPS. Best averages examine every rolling finished-attempt window in the
 session, not just displayed rows. Ao5/Ao12 trim one fastest and slowest result;
 Ao100 trims five each, and Ao1000 fifty each. The latest incomplete single is
 shown as DNF, and unavailable statistics as `--`. Cache statistics between timer
 ticks to avoid repeatedly scanning session history.
-Incomplete attempts remain visible but are excluded from completed-solve averages.
+Incomplete attempts count as DNFs in averages and rank worse than every finite time.
+Trim them among the worst results; any untrimmed DNF makes the whole average DNF.
+Active attempts are excluded.
 CSV exports match the 164-column Cubeast sample schema in smartcubeanalyzer.
 Export finished attempts across all sessions, excluding active recordings.
 Use UTC dates, millisecond times, and raw `move[timestamp]` solution notation;

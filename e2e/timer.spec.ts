@@ -145,6 +145,30 @@ test('current and best Ao1000 details show all contributing solves and fifty exc
   }
 });
 
+for (const dnfs of [5, 6]) test(`Ao100 with ${dnfs} DNFs includes every attempt and trims only five DNFs`, async ({ page }) => {
+  const seed = await averageSeed();
+  const solves = Array.from({ length: 100 }, (_, i) => ({
+    ...seed, id: `dnf-average-${i}`, duration: 10000, status: i < dnfs ? 'incomplete' as const : 'complete' as const,
+    createdAt: new Date(Date.UTC(2020, 0, 1) + i * 1000).toISOString(),
+  }));
+  await page.goto('');
+  await expect(page.getByText('Try simulated cube', { exact: true })).toBeEnabled();
+  await page.locator('input[type=file]').setInputFiles({
+    name: 'dnf-averages.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify({ format: 'timer-v1', solves })),
+  });
+  for (const kind of ['current', 'best']) {
+    const button = page.getByRole('button', { name: `View ${kind} Ao100`, exact: true });
+    await expect(button).toHaveText(dnfs === 5 ? '10.00' : 'DNF');
+    await button.click();
+    const average = page.locator('.average-dialog');
+    await expect(average.getByRole('heading')).toHaveText(dnfs === 5 ? 'Ao100: 10.00s' : 'Ao100: DNF');
+    await expect(average.locator('tbody th')).toHaveText(Array.from({ length: 100 }, (_, i) => String(i + 1)));
+    await expect(average.locator('.average-trimmed-worst')).toHaveText(Array(5).fill('(DNF)'));
+    await expect(average.locator('tbody tr:not(:has(s)) td:nth-child(2)').filter({ hasText: /^DNF$/ })).toHaveCount(dnfs - 5);
+    await average.getByRole('button', { name: 'Close average', exact: true }).click();
+  }
+});
+
 test('production manifest launches the timer and serves installable app icons', async ({ page }) => {
   await page.goto('');
   const manifestURL = await page.locator('link[rel="manifest"]').evaluate(link => (link as HTMLLinkElement).href);

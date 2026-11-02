@@ -82,11 +82,17 @@ export function validateBackup(json: string, cube: Cube): Solve[] {
 export const backupJSON = (solves: Solve[]): string => JSON.stringify({ format: 'timer-v1', solves }, null, 2);
 // Ignore sub-nanosecond rounding noise in rolling sums.
 const improves = (time: number, best: number | null): boolean => best === null || time < best - 1e-6;
+const averageValue = (solve: Solve): number => solve.status === 'complete' ? solveTime(solve) : Infinity;
+const averageResult = (time: number | null): number | 'DNF' | null => time === Infinity ? 'DNF' : time;
 function rollingAverages(values: number[], count: number): { current: number | null; best: number | null; bestStart: number } {
   if (values.length < count || count < 3) return { current: null, best: null, bestStart: 0 };
   const trim = Math.ceil(count / 20), kept = count - trim * 2, sorted = values.slice(0, count).sort((a, b) => a - b);
-  let sum = sorted.slice(trim, -trim).reduce((a, b) => a + b, 0);
-  const current = sum / kept; let best = current, bestStart = 0;
+  let sum = 0, dnfs = 0;
+  // Keep DNFs out of the sum so a later valid window can recover from them.
+  const adjust = (value: number, direction: number) => { if (value === Infinity) dnfs += direction; else sum += direction * value; };
+  sorted.slice(trim, -trim).forEach(value => adjust(value, 1));
+  const time = () => dnfs ? Infinity : sum / kept;
+  const current = time(); let best = current, bestStart = 0;
   const position = (value: number) => {
     let low = 0, high = sorted.length;
     while (low < high) { const mid = (low + high) >>> 1; if (sorted[mid] < value) low = mid + 1; else high = mid; }
@@ -95,29 +101,29 @@ function rollingAverages(values: number[], count: number): { current: number | n
   for (let i = count; i < values.length; i++) {
     // Account for values crossing the trimmed boundaries as the window slides.
     const outgoing = position(values[i - count]);
-    sum -= outgoing < trim ? sorted[trim] : outgoing >= count - trim ? sorted[count - trim - 1] : sorted[outgoing];
+    adjust(outgoing < trim ? sorted[trim] : outgoing >= count - trim ? sorted[count - trim - 1] : sorted[outgoing], -1);
     sorted.splice(outgoing, 1);
     const incoming = position(values[i]);
-    sum += incoming < trim ? sorted[trim - 1] : incoming >= count - trim ? sorted[count - trim - 1] : values[i];
+    adjust(incoming < trim ? sorted[trim - 1] : incoming >= count - trim ? sorted[count - trim - 1] : values[i], 1);
     sorted.splice(incoming, 0, values[i]);
-    if (improves(sum / kept, best)) { best = sum / kept; bestStart = i - count + 1; }
+    if (improves(time(), best)) { best = time(); bestStart = i - count + 1; }
   }
   return { current, best, bestStart };
 }
-export const average = (solves: Solve[], count: number): number | null => rollingAverages(solves.filter(s => s.status === 'complete').slice(0, count).map(solveTime), count).current;
+export const average = (solves: Solve[], count: number): number | 'DNF' | null => averageResult(rollingAverages(solves.filter(s => s.status !== 'active').slice(0, count).map(averageValue), count).current);
 export function numberedSolves(solves: Solve[]): { solve: Solve; number: number }[] {
   return solves.filter(solve => solve.status !== 'active')
     .sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt) || a.id.localeCompare(b.id))
     .map((solve, index) => ({ solve, number: index + 1 }));
 }
 export function averageDetails(solves: Solve[], count: number, best = false): {
-  time: number; solves: { solve: Solve; trimmed: 'best' | 'worst' | null }[];
+  time: number | 'DNF'; solves: { solve: Solve; trimmed: 'best' | 'worst' | null }[];
 } | null {
-  const completed = solves.filter(solve => solve.status === 'complete');
-  const stats = rollingAverages((best ? completed : completed.slice(0, count)).map(solveTime), count);
+  const finished = solves.filter(solve => solve.status !== 'active');
+  const stats = rollingAverages((best ? finished : finished.slice(0, count)).map(averageValue), count);
   if (stats.current === null) return null;
-  const start = best ? stats.bestStart : 0, window = completed.slice(start, start + count);
-  const ranked = window.map((solve, index) => ({ index, time: solveTime(solve) })).sort((a, b) => a.time - b.time || a.index - b.index);
+  const start = best ? stats.bestStart : 0, window = finished.slice(start, start + count);
+  const ranked = window.map((solve, index) => ({ index, time: averageValue(solve) })).sort((a, b) => a.time - b.time || a.index - b.index);
   const trim = Math.ceil(count / 20), trimmed = new Map<number, 'best' | 'worst'>();
   ranked.slice(0, trim).forEach(item => trimmed.set(item.index, 'best'));
   ranked.slice(-trim).forEach(item => trimmed.set(item.index, 'worst'));
@@ -126,25 +132,25 @@ export function averageDetails(solves: Solve[], count: number, best = false): {
     solves: window.map((solve, index) => ({ solve, trimmed: trimmed.get(index) ?? null })).reverse(),
   };
 }
-export function sessionStats(solves: Solve[]): { name: string; current: number | 'DNF' | null; best: number | null }[] {
-  const values = solves.filter(s => s.status === 'complete').map(solveTime), latest = solves.find(s => s.status !== 'active');
+export function sessionStats(solves: Solve[]): { name: string; current: number | 'DNF' | null; best: number | 'DNF' | null }[] {
+  const values = solves.filter(s => s.status !== 'active').map(averageValue), latest = solves.find(s => s.status !== 'active');
   return [
-    { name: 'Single', current: !latest ? null : latest.status === 'complete' ? solveTime(latest) : 'DNF', best: values.length ? values.reduce((best, value) => Math.min(best, value), Infinity) : null },
+    { name: 'Single', current: !latest ? null : latest.status === 'complete' ? solveTime(latest) : 'DNF', best: averageResult(values.length ? values.reduce((best, value) => Math.min(best, value), Infinity) : null) },
     ...[5, 12, 100, 1000].map(count => {
       const { current, best } = rollingAverages(values, count);
-      return { name: `Ao${count}`, current, best };
+      return { name: `Ao${count}`, current: averageResult(current), best: averageResult(best) };
     }),
   ];
 }
 export function newPersonalBests(previous: Solve[], solve: Solve): { name: string; time: number }[] {
-  if (solve.status !== 'complete') return [];
+  if (solve.status === 'active') return [];
   const session = previous.filter(item => item.session === solve.session && item.id !== solve.id)
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-  const before = sessionStats(session), completed = [solve, ...session.filter(item => item.status === 'complete')];
-  const current = [solveTime(solve), ...[5, 12, 100, 1000].map(count => average(completed.slice(0, count), count))];
+  const before = sessionStats(session), finished = [solve, ...session.filter(item => item.status !== 'active')];
+  const current = [solve.status === 'complete' ? solveTime(solve) : 'DNF', ...[5, 12, 100, 1000].map(count => average(finished.slice(0, count), count))];
   return before.flatMap((stat, i) => {
     const time = current[i];
-    return time !== null && improves(time, stat.best) ? [{ name: stat.name, time }] : [];
+    return typeof time === 'number' && improves(time, typeof stat.best === 'number' ? stat.best : null) ? [{ name: stat.name, time }] : [];
   });
 }
 export function personalBestNotifications(records: ReturnType<typeof newPersonalBests>, shown: Set<string>, showEveryLongPb = false): ReturnType<typeof newPersonalBests> {

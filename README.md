@@ -31,13 +31,14 @@ by `npm install`. Native GATT connection and service discovery each have a
 15-second deadline, separate status messages, and no hidden retry loop.
 
 History is stored in this browser's IndexedDB. Export JSON backups before
-clearing site data. Interrupted attempts are retained and excluded from averages.
+clearing site data. Interrupted attempts are retained as DNFs and included in averages.
 The Current / records card shows current and best Single, Ao5, Ao12, Ao100, and
 Ao1000, separately from session history and its replay/import/export controls.
-Current averages use the latest completed solves; best averages include every
+Current averages use the latest finished attempts, including DNFs; best averages include every
 rolling window in the selected session, even beyond the displayed history rows.
 Ao5/Ao12 trim one fastest and slowest solve, Ao100 trims five each, and Ao1000
-trims fifty each. The latest incomplete single displays DNF; insufficient averages
+trims fifty each. DNFs rank as the worst times; any DNF remaining after trimming
+makes the average DNF. The latest incomplete single displays DNF; insufficient averages
 display `--`.
 Simulated solves are labeled. Move counts and TPS use quarter-turn metric.
 **Export Cubeast CSV** exports finished attempts across all sessions using the

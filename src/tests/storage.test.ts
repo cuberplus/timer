@@ -103,11 +103,72 @@ test('rejects invalid timelines, false completion, duplicate ids and scramble mi
   expect(() => validateBackup(backupJSON([{ ...solve, scramble: 'F' }]), cube)).toThrow('start');
 });
 
-test('averages trim high/low and exclude incomplete attempts', () => {
+test('averages trim high/low, include DNFs and exclude active attempts', () => {
   const solve = sample();
   const items = [1, 2, 3, 4, 100].map(n => ({ ...solve, duration: n * 1000 }));
+  expect(average([{ ...solve, status: 'active' }, ...items], 5)).toBe(3000);
   expect(average([{ ...solve, status: 'incomplete' }, ...items], 5)).toBe(3000);
+  expect(average([{ ...solve, status: 'incomplete' }, ...items.slice().reverse()], 5)).toBeCloseTo(107000 / 3);
   expect(average(items, 12)).toBeNull();
+});
+
+test.each([5, 12, 100, 1000])('Ao%s trims DNFs as worst and becomes DNF above the trim allowance', count => {
+  const seed = sample(), trim = Math.ceil(count / 20);
+  for (const dnfs of [trim, trim + 1, count]) {
+    const solves = Array.from({ length: count }, (_, i) => ({
+      ...seed, id: String(i), duration: 10000, status: i < dnfs ? 'incomplete' as const : 'complete' as const,
+    }));
+    const expected = dnfs <= trim ? 10000 : 'DNF';
+    expect(average(solves, count)).toBe(expected);
+    expect(sessionStats(solves).find(stat => stat.name === `Ao${count}`)).toEqual({ name: `Ao${count}`, current: expected, best: expected });
+    const details = averageDetails(solves, count)!;
+    expect(details.time).toBe(expected);
+    expect(details.solves).toHaveLength(count);
+    expect(details.solves.filter(item => item.trimmed === 'worst')).toHaveLength(trim);
+    expect(details.solves.filter(item => item.trimmed === 'worst').every(item => item.solve.status === 'incomplete')).toBe(true);
+    expect(details.solves.filter(item => item.trimmed === null).some(item => item.solve.status === 'incomplete')).toBe(dnfs > trim);
+  }
+});
+
+test.each([5, 12, 100, 1000])('rolling Ao%s recovers between DNF and valid windows and selects the correct best details', count => {
+  const seed = sample(), trim = Math.ceil(count / 20);
+  const solves = Array.from({ length: count * 3 + 13 }, (_, i) => ({
+    ...seed, id: String(i), duration: 10000 + (i * 13 % 23) * 100,
+    status: i % (count + 7) < trim + 2 ? 'incomplete' as const : 'complete' as const,
+  }));
+  const means = Array.from({ length: solves.length - count + 1 }, (_, start) => {
+    const kept = solves.slice(start, start + count).map(solve => solve.status === 'incomplete' ? Infinity : solve.duration)
+      .sort((a, b) => a - b).slice(trim, -trim);
+    return kept.reduce((sum, value) => sum + value, 0) / kept.length;
+  });
+  const best = Math.min(...means), stats = sessionStats(solves).find(stat => stat.name === `Ao${count}`)!;
+  expect(means[0]).toBe(Infinity);
+  expect(Number.isFinite(best)).toBe(true);
+  expect(stats.current).toBe('DNF');
+  expect(stats.best).toBeCloseTo(best, 7);
+  const details = averageDetails(solves, count, true)!;
+  expect(details.time).toBeCloseTo(best, 7);
+  expect(details.solves.map(item => item.solve.id)).toEqual(solves.slice(means.indexOf(best), means.indexOf(best) + count).reverse().map(solve => solve.id));
+  const reversed = sessionStats(solves.slice().reverse()).find(stat => stat.name === `Ao${count}`)!;
+  expect(reversed.best).toBeCloseTo(best, 7);
+  const current = average(solves.slice().reverse(), count);
+  if (Number.isFinite(means.at(-1)!)) expect(current).toBeCloseTo(means.at(-1)!, 7);
+  else expect(current).toBe('DNF');
+});
+
+test('PB checks include DNFs in new windows, never celebrate DNF averages, and accept finite averages after DNF records', () => {
+  const seed = sample();
+  const previous = [12000, 14000, 1, 16000, 1].map((duration, i) => ({
+    ...seed, id: `previous-${i}`, duration, status: duration === 1 ? 'incomplete' as const : 'complete' as const,
+    createdAt: new Date(Date.UTC(2026, 0, 1, 0, 0, 10 - i)).toISOString(),
+  }));
+  expect(newPersonalBests(previous, { ...seed, duration: 10000 })).toEqual([
+    { name: 'Single', time: 10000 }, { name: 'Ao5', time: 14000 },
+  ]);
+  expect(newPersonalBests(previous, { ...seed, status: 'incomplete' })).toEqual([]);
+  expect(newPersonalBests(previous.filter(solve => solve.status === 'complete'), { ...seed, duration: 10000 })).toEqual([{ name: 'Single', time: 10000 }]);
+  const four = [10000, 12000, 14000, 16000].map((duration, i) => ({ ...seed, id: `previous-${i}`, duration }));
+  expect(newPersonalBests(four, { ...seed, status: 'incomplete' })).toEqual([{ name: 'Ao5', time: 14000 }]);
 });
 
 test('identifies every single and average PB improved by the same solve', () => {
@@ -166,7 +227,7 @@ test('PB checks read older solve times only for previous records, not for the ne
   expect(reads).toBe(1);
 });
 
-test('current average details do not read times outside the newest completed window', () => {
+test('current average details do not read times outside the newest finished window', () => {
   const seed = sample(), older = { ...seed, id: 'older' };
   let reads = 0;
   Object.defineProperty(older, 'duration', { get: () => { reads++; return 1; } });
@@ -178,7 +239,7 @@ test('current average details do not read times outside the newest completed win
 test('average details select the current or best window and identify trimmed solves including penalties', () => {
   const seed = sample();
   const solves = [20000, 10000, 9000, 8000, 7000, 6000, 5000].map((duration, i) => ({ ...seed, id: String(i), duration }));
-  const current = averageDetails([{ ...seed, status: 'incomplete' }, ...solves], 5)!;
+  const current = averageDetails([{ ...seed, status: 'active' }, ...solves], 5)!;
   expect(current.time).toBe(9000);
   expect(current.solves.map(item => [item.solve.id, item.trimmed])).toEqual([
     ['4', 'best'], ['3', null], ['2', null], ['1', null], ['0', 'worst'],
@@ -220,7 +281,7 @@ test('every long-average PB can be shown without losing the daily ledger when th
   expect(personalBestNotifications(records, shown, false).map(record => record.name)).toEqual(['Single', 'Ao5', 'Ao12']);
 });
 
-test('current and best singles respect the latest attempt while averages exclude unfinished recordings', () => {
+test('current and best singles respect the latest attempt while averages exclude active recordings', () => {
   const solve = sample();
   const items = [10, 10, 10, 10, 10, 1, 1, 1, 1, 1].map(n => ({ ...solve, duration: n * 1000 }));
   const stats = sessionStats([{ ...solve, status: 'active' }, { ...solve, status: 'incomplete' }, ...items]);

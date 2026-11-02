@@ -122,7 +122,8 @@ export default function App() {
     const copy = structuredClone(solve);
     const previous = historyRef.current, check = recordChecks.current.get(copy.id);
     updateHistory([copy, ...previous.filter(item => item.id !== copy.id)].sort((a, b) => b.createdAt.localeCompare(a.createdAt)));
-    if (copy.status === 'complete') {
+    if (copy.status === 'incomplete') setCelebrations(current => current.filter(item => item.solve.id !== copy.id));
+    if (copy.status !== 'active') {
       if (check) check.solve = copy;
       else {
         const timeout = setTimeout(() => {
@@ -141,9 +142,6 @@ export default function App() {
         }, Math.max(0, 501 - (performance.now() - (copy.moves.at(-1)?.hostTime ?? performance.now()))));
         recordChecks.current.set(copy.id, { solve: copy, previous, timeout });
       }
-    } else if (copy.status === 'incomplete') {
-      if (check) { clearTimeout(check.timeout); recordChecks.current.delete(copy.id); }
-      setCelebrations(current => current.filter(item => item.solve.id !== copy.id));
     }
     pending.current++;
     setStorage('Saving locally...');
@@ -448,13 +446,13 @@ export default function App() {
     </section>
     <section className="panel mt-3">
       <h2>Current / records</h2>
-      <p className="small text-secondary mt-3">Solves: {filtered.filter(solve => solve.status === 'complete').length} completed. Averages exclude incomplete attempts.</p>
+      <p className="small text-secondary mt-3">Solves: {filtered.filter(solve => solve.status === 'complete').length} completed. Averages include DNFs as the worst times; any untrimmed DNF makes the average DNF.</p>
       <div className="table-responsive">
         <table className="table table-sm" aria-label="Session statistics"><thead><tr><th scope="col">Metric</th><th scope="col">Current</th><th scope="col">Best</th></tr></thead>
           <tbody>{statistics.map(stat => <tr key={stat.name}><th scope="row">{stat.name}</th>
-            {(['current', 'best'] as const).map(kind => <td key={kind}>{stat[kind] === 'DNF' ? 'DNF' : stat[kind] === null ? '--' :
-              stat.name === 'Single' ? formatTime(stat[kind] as number, precision) :
-                <button className="stat-link" aria-label={`View ${kind} ${stat.name}`} onClick={() => setAverage(averageDetails(filtered, Number(stat.name.slice(2)), kind === 'best'))}>{formatTime(stat[kind] as number, precision)}</button>}
+            {(['current', 'best'] as const).map(kind => <td key={kind}>{stat[kind] === null ? '--' :
+              stat.name === 'Single' ? stat[kind] === 'DNF' ? 'DNF' : formatTime(stat[kind] as number, precision) :
+                <button className="stat-link" aria-label={`View ${kind} ${stat.name}`} onClick={() => setAverage(averageDetails(filtered, Number(stat.name.slice(2)), kind === 'best'))}>{stat[kind] === 'DNF' ? 'DNF' : formatTime(stat[kind] as number, precision)}</button>}
             </td>)}
           </tr>)}</tbody>
         </table>
@@ -504,6 +502,6 @@ export default function App() {
       <button className="btn btn-sm btn-outline-light pb-dismiss" aria-label="Dismiss personal best"
         onClick={() => setCelebrations(current => current.filter(item => item.id !== celebration.id))}>Dismiss</button>
     </div>)}</div>}
-    <footer className="text-secondary small mt-4">Browser-only. No API, backend, accounts, or uploads. Export backups before clearing browser data. Version 0.2.4.</footer>
+    <footer className="text-secondary small mt-4">Browser-only. No API, backend, accounts, or uploads. Export backups before clearing browser data. Version 0.2.5.</footer>
   </main>;
 }

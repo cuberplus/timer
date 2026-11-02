@@ -308,6 +308,19 @@ test('loading existing records does not replay PB celebrations', async () => {
   expect(container.querySelector('[aria-label="Personal best"]')).toBeNull();
 });
 
+test('a DNF completing the first valid average notifies only for the average and includes the DNF in its details', async () => {
+  await timedApp([10000, 12000, 14000, 16000].map((duration, i) => historySolve(4 - i, duration, 2)));
+  await click('Connect cube');
+  await act(async () => { move('R', 100); move('U2', 200); move('U', 300); });
+  await click('Abort solve');
+  await act(async () => jest.advanceTimersByTime(501));
+  expect(container.querySelector('[aria-label="View PB Single"]')).toBeNull();
+  expect(container.querySelector('[aria-label="View PB Ao5"]')?.textContent).toContain('Ao5: 14.00s');
+  await click('View PB Ao5');
+  expect(container.querySelectorAll('[aria-label="Average solves"] tbody tr')).toHaveLength(5);
+  expect(container.querySelector('.average-trimmed-worst')?.textContent).toBe('(DNF)');
+});
+
 test('a slower newest Ao12 does not notify for a historical floating-point PB', async () => {
   const durations = [11061.2, 11049.64, 12629.46, 12904.71, 13730.08, 11337.38, 12487.66, 12645.04, 12788.3, 13350.35, 11119.56, 11000];
   await timedApp(durations.map((duration, i) => historySolve(12 - i, duration, 2)));
@@ -343,7 +356,7 @@ test('average PB notifications retain their original window after later solves a
 
 test.each([5, 12, 100, 1000])('current and best Ao%s open their exact windows with the correct number of exclusions', async count => {
   const solves = Array.from({ length: count + 2 }, (_, i) => historySolve(i + 1, 10000 + i * 100, 2));
-  await showHistory([...solves, historySolve(count + 3, 1, 2, 'Other'), historySolve(count + 4, 1, 2, 'Default', 'incomplete')]);
+  await showHistory([...solves, historySolve(count + 3, 1, 2, 'Other'), historySolve(count + 4, 1, 2, 'Default', 'active')]);
   for (const kind of ['current', 'best']) {
     await click(`View ${kind} Ao${count}`);
     const rows = container.querySelectorAll('[aria-label="Average solves"] tbody tr');
@@ -376,14 +389,29 @@ test('average solve numbers match session history across DNFs, active solves and
   await showHistory(solves);
   await click('Time');
   const history = container.querySelectorAll('[aria-label="Solve history"] tbody tr');
-  const expected = Array.from(history).filter(row => /^(10|11|12|13|14)\.00s$/.test(row.children[1].textContent!))
-    .map(row => row.children[0].textContent);
-  expect(expected).toEqual(['4', '5', '6', '8', '9']);
+  const expected = ['5', '6', '7', '8', '9'];
+  expect(expected.every(number => Array.from(history).some(row => row.children[0].textContent === number))).toBe(true);
   await click('View current Ao5');
   const rows = container.querySelectorAll('[aria-label="Average solves"] tbody tr');
   expect(Array.from(rows, row => row.children[0].textContent)).toEqual(expected);
+  expect(rows[2].querySelector('.average-trimmed-worst')?.textContent).toBe('(DNF)');
+  expect(container.querySelector('#average-title')?.textContent).toBe('Ao5: 13.00s');
   await click('View average solve 8');
   expect(container.querySelector('[aria-label="Solve replay"]')?.getAttribute('data-solve-id')).toBe('7');
+});
+
+test('DNF current and best averages open details showing untrimmed DNFs without numbering gaps', async () => {
+  await showHistory(Array.from({ length: 5 }, (_, i) => historySolve(i + 1, 10000, 2, 'Default', i < 2 ? 'incomplete' : 'complete')));
+  for (const kind of ['current', 'best']) {
+    expect(container.querySelector(`[aria-label="View ${kind} Ao5"]`)?.textContent).toBe('DNF');
+    await click(`View ${kind} Ao5`);
+    expect(container.querySelector('#average-title')?.textContent).toBe('Ao5: DNF');
+    const rows = container.querySelectorAll('[aria-label="Average solves"] tbody tr');
+    expect(Array.from(rows, row => row.children[0].textContent)).toEqual(['1', '2', '3', '4', '5']);
+    expect(container.querySelector('.average-trimmed-worst')?.textContent).toBe('(DNF)');
+    expect(Array.from(rows, row => row.children[1].textContent)).toContain('DNF');
+    await click('Close average');
+  }
 });
 
 test.each(['accepted', 'dismissed'] as const)('Options prompts installation once when Chrome offers it (%s)', async outcome => {
