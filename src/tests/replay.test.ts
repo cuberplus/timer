@@ -33,7 +33,7 @@ function recording(scramble: string, solution: string, status: Solve['status'] =
   return {
     version: 1, id: 'replay-fixture', session: 'Test', createdAt: new Date().toISOString(), device: 'Test',
     scramble, startFacelets: cube.facelets(cube.solved().applyAlg(scramble)), duration: moves.at(-1)?.elapsed ?? 0,
-    status, reason: '', timingBasis: 'host', moves, orientations: [],
+    status, reason: '', timingBasis: 'host', moves,
   };
 }
 async function draw(solve: Solve) {
@@ -125,6 +125,20 @@ test('repeated turns compact within a step without combining across a milestone'
   await act(async () => firstPair.click());
   expect(position()).toBe('6');
   expect(facelets()).toBe(cube.facelets(cube.parse(solve.startFacelets).applyAlg('D2')));
+});
+
+test('replay shows recognized F2L, OLL and PLL labels beside the step headings, but no invalidated PLL case', async () => {
+  const solution = `R' F R F' R U R2 U' R' F R U R U' F' ${pll}`;
+  const solve = recording(solution.split(' ').reverse().map(inverse).join(' '), solution);
+  const before = structuredClone(solve);
+  await draw(solve);
+  expect(container.querySelector('[aria-label="F2L Pair 4 case"]')!.textContent).toBe('F2L 1');
+  expect(container.querySelector('[aria-label="OLL case"]')!.textContent).toBe('OLL 34');
+  expect(container.querySelector('[aria-label="PLL case"]')!.textContent).toBe('T perm');
+  expect(solve).toEqual(before);
+  await draw({ ...solve, status: 'incomplete' });
+  expect(container.querySelector('[aria-label="OLL case"]')!.textContent).toBe('OLL 34');
+  expect(container.querySelector('[aria-label="PLL case"]')).toBeNull();
 });
 
 test('combined turns seek to the last raw move while next, previous and playback preserve intermediate states', async () => {

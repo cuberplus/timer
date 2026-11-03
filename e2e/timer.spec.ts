@@ -1,7 +1,8 @@
 import { test, expect, type Locator, type Page } from '@playwright/test';
 import type { TwistyPlayer } from 'cubing/twisty';
 import { TimerEngine, type Solve } from '../src/engine';
-import { loadCube, SOLVED } from '../src/puzzle';
+import { inverse, loadCube, SOLVED } from '../src/puzzle';
+import { backupJSON, validateBackup } from '../src/storage';
 
 async function expectAnimatedTurn(button: Locator, visualizer: string) {
   const animated = await button.evaluate(async (element, selector) => {
@@ -39,7 +40,7 @@ async function averageSeed(): Promise<Solve> {
   return timer.result!;
 }
 
-test('PB notifications stack without overlap and open their own single or average details', async ({ page }) => {
+test('daily streak fire and PB notifications animate, stack without overlap and dismiss independently', async ({ page }) => {
   const seed = await averageSeed();
   const solves = Array.from({ length: 11 }, (_, i) => ({
     ...seed, id: `pb-seed-${i}`, duration: 41000 - i * 1000, createdAt: new Date(Date.UTC(2020, 0, 1, 0, 0, i)).toISOString(),
@@ -61,15 +62,33 @@ test('PB notifications stack without overlap and open their own single or averag
   await page.getByRole('button', { name: 'Simulate solve', exact: true }).click();
   const notices = page.getByRole('status', { name: 'Personal best', exact: true });
   await expect(notices).toHaveCount(3);
+  const streak = page.getByRole('status', { name: 'Daily streak', exact: true }), flame = streak.locator('.streak-flame');
+  await expect(streak).toContainText('Congratulations!');
+  await expect(streak).toContainText('Daily Streak: 1');
+  await expect(streak).toContainText('Best Streak: 1');
+  await expect(flame).toHaveCSS('animation-duration', '0.9s');
+  await expect(flame).toHaveCSS('animation-iteration-count', 'infinite');
+  const transform = await flame.evaluate(element => getComputedStyle(element).transform);
+  await expect.poll(() => flame.evaluate(element => getComputedStyle(element).transform)).not.toBe(transform);
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await expect(flame).toHaveCSS('animation-name', 'none');
+  await expect(streak.locator('.streak-embers')).toHaveCSS('animation-name', 'none');
+  await expect(notices.first().locator('.pb-disco-ball')).toHaveCSS('animation-name', 'none');
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+  const allNotices = page.getByLabel('Solve notifications', { exact: true }).locator('.pb-celebration');
+  await expect(allNotices).toHaveCount(4);
   for (const width of [1280, 375]) {
     await page.setViewportSize({ width, height: 900 });
-    const boxes = await notices.evaluateAll(elements => elements.map(element => {
+    const boxes = await allNotices.evaluateAll(elements => elements.map(element => {
       const { top, bottom, left, right } = element.getBoundingClientRect();
       return { top, bottom, left, right };
     }));
     expect(boxes.every(box => box.left >= 0 && box.right <= width && box.top >= 0 && box.bottom <= 900)).toBe(true);
     expect(boxes.every((box, i) => boxes.slice(i + 1).every(other => box.bottom < other.top))).toBe(true);
   }
+  await streak.getByRole('button', { name: 'Dismiss daily streak', exact: true }).click();
+  await expect(streak).toHaveCount(0);
+  await expect(notices).toHaveCount(3);
   await page.getByRole('button', { name: 'View PB Single', exact: true }).click({ position: { x: 4, y: 4 } });
   const replay = page.getByRole('dialog', { name: 'Solve replay', exact: true });
   await expect(replay).toBeVisible();
@@ -109,6 +128,75 @@ test('PB notifications stack without overlap and open their own single or averag
   await page.keyboard.press('Enter');
   await expect(average.getByRole('heading')).toHaveText(/^Ao5:/);
   await average.getByRole('button', { name: 'Close average', exact: true }).click();
+});
+
+test('ten off-track moves repeatedly find real solver routes to solved and keep the original partial scramble', async ({ page }) => {
+  await page.goto('');
+  const simulator = page.getByText('Try simulated cube', { exact: true });
+  await expect(simulator).toBeEnabled();
+  await simulator.evaluate(button => (button as HTMLButtonElement).click());
+  const guided = page.getByRole('button', { name: 'Perform guided move', exact: true });
+  await expect(guided).toBeEnabled({ timeout: 45000 });
+  const original = await page.locator('.scramble .move').allTextContents();
+  const scrambleFont = await page.locator('.scramble .move').first().evaluate(element => getComputedStyle(element).font);
+  for (let i = 0; i < Math.floor(original.length / 2); i++) await guided.click();
+  const completedScramble = await page.locator('.scramble .done').allTextContents();
+  const pending = await page.locator('.scramble .current').innerText();
+  const wrong = 'RL'.includes(pending[0]) ? 'F' : 'R';
+  for (let i = 0; i < 9; i++) await page.getByRole('button', { name: i % 2 ? 'U' : wrong, exact: true }).click();
+  await expect(page.getByRole('group', { name: 'Correction moves', exact: true }).locator('.move')).toHaveCount(9);
+  await expect(page.locator('.scramble .move:not(.correction)')).toHaveText(completedScramble);
+  await expect(page.locator('.scramble .move:not(.done):not(.correction)')).toHaveCount(0);
+  await page.getByRole('button', { name: 'U', exact: true }).click();
+  await expect(guided).toBeEnabled({ timeout: 45000 });
+  const setup = page.getByRole('group', { name: 'Path to solved', exact: true });
+  await expect(setup).toBeVisible();
+  await expect(page.getByRole('group', { name: 'Correction moves', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('group', { name: 'Original scramble', exact: true })).toHaveCount(0);
+  await expect(page.locator('.scramble .done')).toHaveCount(0);
+  await guided.click();
+  const firstRoute = await setup.locator('.move').allTextContents();
+  const completedReturn = await setup.locator('.done').allTextContents();
+  expect(completedReturn.length).toBeGreaterThan(0);
+  const next = await setup.locator('.current').innerText();
+  const wrongAgain = 'RL'.includes(next[0]) ? 'F' : 'R';
+  await page.getByRole('button', { name: wrongAgain, exact: true }).click();
+  await expect(setup).toBeVisible();
+  await expect(setup.locator('.move')).toHaveText(completedReturn);
+  await expect(setup.locator('.move:not(.done)')).toHaveCount(0);
+  await expect(setup.locator('.current')).toHaveCount(0);
+  await expect(page.locator('.scramble .current.correction')).toHaveCount(1);
+  await expect(page.getByRole('group', { name: 'Original scramble', exact: true })).toHaveCount(0);
+  expect(await setup.evaluate(element => !!(element.compareDocumentPosition(document.querySelector('[aria-label="Correction moves"]')!) & Node.DOCUMENT_POSITION_FOLLOWING))).toBe(true);
+  await expect(setup.locator('.done').first()).toHaveCSS('color', 'rgb(101, 211, 176)');
+  expect(await page.locator('.scramble .correction').first().evaluate(element => getComputedStyle(element).font)).toBe(scrambleFont);
+  expect(await setup.locator('.move').first().evaluate(element => getComputedStyle(element).font)).toBe(scrambleFont);
+  await guided.click();
+  await expect(setup.locator('.move')).toHaveText(firstRoute);
+  await expect(setup.locator('.current')).toHaveText(next);
+  await expect(page.getByRole('group', { name: 'Original scramble', exact: true })).toHaveCount(0);
+  for (let i = 0; i < 9; i++) {
+    await page.getByRole('button', { name: i % 2 ? 'U' : wrongAgain, exact: true }).click();
+    await expect(setup).toBeVisible();
+    await expect(setup.locator('.move')).toHaveText(completedReturn);
+    await expect(setup.locator('.move:not(.done)')).toHaveCount(0);
+  }
+  await page.getByRole('button', { name: 'U', exact: true }).click();
+  await expect(guided).toBeEnabled({ timeout: 45000 });
+  await expect(setup).toBeVisible();
+  expect(await setup.locator('.move').allTextContents()).not.toEqual(firstRoute);
+  await expect(page.getByRole('group', { name: 'Correction moves', exact: true })).toHaveCount(0);
+  const solve = page.getByRole('button', { name: 'Simulate solve', exact: true });
+  for (let i = 0; i < 100 && !await solve.isEnabled(); i++) await guided.click();
+  await expect(solve).toBeEnabled();
+  await expect(setup).toHaveCount(0);
+  await expect(page.getByRole('group', { name: 'Original scramble', exact: true }).locator('.done')).toHaveText(original);
+  expect(await storedSolves(page)).toEqual([]);
+  await solve.click();
+  await expect(page.getByRole('table', { name: 'Solve history' }).locator('tbody tr')).toHaveCount(1);
+  const [recorded] = await storedSolves(page);
+  expect(recorded.status).toBe('complete');
+  expect(recorded.scramble).toBe(original.join(' '));
 });
 
 test('current and best Ao1000 details show all contributing solves and fifty exclusions per end', async ({ page }) => {
@@ -416,9 +504,12 @@ test('browser-only scramble, solve, persistence, replay and backup', async ({ pa
   await expect(celebration).toContainText(/Single: \d+\.\d{3}s/);
   await expect(celebration.locator('.pb-disco-ball')).toHaveCSS('animation-duration', '1.4s');
   await expect(celebration.locator('.pb-disco-ball')).toHaveCSS('animation-iteration-count', 'infinite');
-  await expect(page.getByLabel('Personal best notifications', { exact: true })).toHaveCSS('position', 'fixed');
+  await expect(page.getByLabel('Solve notifications', { exact: true })).toHaveCSS('position', 'fixed');
   await expect(celebration).toHaveCSS('pointer-events', 'auto');
-  await expect(history.getByRole('columnheader')).toHaveText(['Solve number', 'Time', 'Turns', 'TPS', 'View']);
+  await expect(history.getByRole('columnheader')).toHaveText(['Solve', 'Time', 'Turns', 'TPS', 'View']);
+  await expect(page.getByRole('button', { name: 'Export CSV', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Export JSON', includeHidden: true })).toBeHidden();
+  await expect(page.getByText('Import JSON', { exact: true })).toBeHidden();
   for (const [i, name] of ['Cross', 'F2L Pair 1', 'F2L Pair 2', 'F2L Pair 3', 'F2L Pair 4', 'OLL', 'PLL'].entries()) {
     const label = page.locator(`.trail-duration[data-step="${i}"]`);
     await expect(label).toBeVisible();
@@ -522,11 +613,11 @@ test('browser-only scramble, solve, persistence, replay and backup', async ({ pa
   await celebration.getByRole('button', { name: 'Dismiss personal best' }).click();
   await expect(celebration).toHaveCount(0);
   const downloadPromise = page.waitForEvent('download');
-  await page.getByRole('button', { name: 'Export JSON' }).click();
+  await page.getByRole('button', { name: 'Export JSON', includeHidden: true }).evaluate(button => (button as HTMLButtonElement).click());
   const download = await downloadPromise;
   expect(download.suggestedFilename()).toMatch(/^timer-.*\.json$/);
   const csvPromise = page.waitForEvent('download');
-  await page.getByRole('button', { name: 'Export Cubeast CSV' }).click();
+  await page.getByRole('button', { name: 'Export CSV' }).click();
   const csv = await csvPromise;
   expect(csv.suggestedFilename()).toMatch(/^timer-.*\.csv$/);
   const stream = await csv.createReadStream();
@@ -565,7 +656,7 @@ test('browser-only scramble, solve, persistence, replay and backup', async ({ pa
   const originalSingle = await statistics.getByRole('row', { name: /^Single / }).getByRole('cell').allTextContents();
   const backupChunks: Buffer[] = [];
   for await (const chunk of (await download.createReadStream())!) backupChunks.push(Buffer.from(chunk));
-  const seed = (JSON.parse(Buffer.concat(backupChunks).toString('utf8')) as { solves: Solve[] }).solves[0];
+  const seed = validateBackup(Buffer.concat(backupChunks).toString('utf8'), await loadCube())[0];
   const solves = Array.from({ length: 1100 }, (_, i) => {
     const duration = i < 100 ? 30000 : 10000;
     return { ...seed, id: `statistics-${i}`, session: 'Statistics test', duration, createdAt: new Date(Date.UTC(2020, 0, 1) - i * 1000).toISOString(),
@@ -659,6 +750,33 @@ test('options use a self-contained responsive dialog with keyboard dismissal and
   await expect(options).toBeFocused();
 });
 
+test('imports backups larger than 10 MB and exports lossless compact backups', async ({ page }) => {
+  const solve = await averageSeed(), cube = await loadCube();
+  await page.goto('');
+  await expect(page.getByText('Try simulated cube', { exact: true })).toBeEnabled();
+  await page.locator('input[type=file]').setInputFiles({
+    name: 'large-backup.json', mimeType: 'application/json',
+    buffer: Buffer.concat([Buffer.alloc(10_000_001, ' '), Buffer.from(JSON.stringify({ format: 'timer-v1', solves: [solve] }))]),
+  });
+  const history = page.getByRole('table', { name: 'Solve history' });
+  await expect(history.locator('tbody tr')).toHaveCount(1);
+  await expect(history.getByRole('button', { name: 'View', exact: true })).toHaveCount(1);
+  const downloadPromise = page.waitForEvent('download');
+  await page.getByRole('button', { name: 'Export JSON', includeHidden: true }).evaluate(button => (button as HTMLButtonElement).click());
+  const download = await downloadPromise;
+  const chunks: Buffer[] = [];
+  for await (const chunk of (await download.createReadStream())!) chunks.push(Buffer.from(chunk));
+  const compact = Buffer.concat(chunks);
+  expect(validateBackup(compact.toString('utf8'), cube)).toEqual([solve]);
+  const restored = JSON.parse(compact.toString('utf8')) as { solves: { id: string }[] };
+  restored.solves[0].id = 'compact-restored';
+  await page.locator('input[type=file]').setInputFiles({ name: 'compact.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(restored)) });
+  await expect(history.locator('tbody tr')).toHaveCount(2);
+  await page.reload();
+  await expect(history.locator('tbody tr')).toHaveCount(2);
+  expect(await storedSolves(page)).toEqual(expect.arrayContaining([solve, { ...solve, id: 'compact-restored' }]));
+});
+
 test('rejects invalid backups without changing history', async ({ page }) => {
   await page.goto('');
   await expect(page.getByText('Try simulated cube', { exact: true })).toBeEnabled();
@@ -667,6 +785,45 @@ test('rejects invalid backups without changing history', async ({ page }) => {
   });
   await expect(page.getByRole('alert')).toContainText('Invalid solve');
   await expect(page.getByRole('table', { name: 'Solve history' }).getByRole('row')).toHaveCount(1);
+});
+
+test('case names stay beside replay step headings and export after backup restoration', async ({ page }) => {
+  const cube = await loadCube(), timer = new TimerEngine(cube, () => {}, () => {});
+  const solution = "R' F R F' R U R2 U' R' F R U R U' F' R U R' U' R' F R2 U' R' U' R U R' F'";
+  const scramble = solution.split(' ').reverse().map(inverse);
+  timer.connect('Test cube'); timer.synchronize(SOLVED); timer.prepare(scramble.join(' '));
+  [...scramble, ...solution.split(' ')].forEach((move, i) => timer.turn({ move, hostTime: i * 100, localTimestamp: i * 100, cubeTimestamp: null }));
+  const solve = timer.result!;
+  await page.goto('');
+  await expect(page.getByText('Try simulated cube', { exact: true })).toBeEnabled();
+  await page.locator('input[type=file]').setInputFiles({
+    name: 'recognized-cases.json', mimeType: 'application/json', buffer: Buffer.from(backupJSON([solve])),
+  });
+  await page.reload();
+  await page.getByRole('table', { name: 'Solve history' }).getByRole('button', { name: 'View', exact: true }).click();
+  const replay = page.getByRole('dialog', { name: 'Solve replay', exact: true });
+  for (const width of [1280, 375]) {
+    await page.setViewportSize({ width, height: 900 });
+    for (const [step, label] of [['F2L Pair 4', 'F2L 1'], ['OLL', 'OLL 34'], ['PLL', 'T perm']]) {
+      const group = replay.getByRole('group', { name: `${step} solution`, exact: true });
+      const badge = group.getByLabel(`${step} case`, { exact: true });
+      await expect(badge).toHaveText(label);
+      const heading = (await group.getByRole('heading', { name: step, exact: true }).boundingBox())!;
+      const caseBox = (await badge.boundingBox())!, alg = (await group.getByRole('button').first().boundingBox())!;
+      expect(caseBox.x).toBeGreaterThanOrEqual(heading.x + heading.width);
+      expect(caseBox.y).toBeLessThan(heading.y + heading.height);
+      expect(caseBox.y + caseBox.height).toBeGreaterThan(heading.y);
+      expect(alg.y).toBeGreaterThanOrEqual(Math.max(heading.y + heading.height, caseBox.y + caseBox.height));
+    }
+  }
+  await replay.getByRole('button', { name: 'Close replay', exact: true }).click();
+  const downloadPromise = page.waitForEvent('download');
+  await page.getByRole('button', { name: 'Export CSV', exact: true }).click();
+  const chunks: Buffer[] = [];
+  for await (const chunk of (await (await downloadPromise).createReadStream())!) chunks.push(Buffer.from(chunk));
+  const [header, line] = Buffer.concat(chunks).toString('utf8').split('\r\n');
+  const row = Object.fromEntries(header.split(',').map((column, i) => [column, line.split(',')[i]]));
+  expect(row).toMatchObject({ step_4_case: '1', step_5_case: '34', step_6_case: 'T' });
 });
 
 test('hide distracting visuals persists and animates zero to three dots without moving Solving', async ({ page }) => {

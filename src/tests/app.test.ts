@@ -6,7 +6,7 @@ import { webcrypto } from 'node:crypto';
 import { deserialize, serialize } from 'node:v8';
 import type { SmartCubeEvent } from 'smartcube-web-bluetooth';
 import type { Solve } from '../engine';
-import { averageDetails, newPersonalBests, numberedSolves, personalBestNotifications, sessionStats } from '../storage';
+import { averageDetails, dailyStreak, newPersonalBests, numberedSolves, personalBestNotifications, sessionStats, solveEndDate } from '../storage';
 import { loadCube, SOLVED, Cube, inverse, isMove, movesOf, locations, sameAxis, simplifyMoves } from '../puzzle';
 
 const cube = await loadCube();
@@ -30,7 +30,7 @@ await jest.unstable_mockModule('../bluetooth', () => ({ BluetoothCube: class {
 } }));
 await jest.unstable_mockModule('../storage', () => ({
   saveSolves: save, readSolves: async () => recovered, backupJSON: () => '', validateBackup: () => recovered,
-  cubeastCSV: () => '', averageDetails, newPersonalBests, numberedSolves, personalBestNotifications, sessionStats, turns: (solve: Solve) => solve.moves.length,
+  cubeastCSV: () => '', averageDetails, dailyStreak, newPersonalBests, numberedSolves, personalBestNotifications, sessionStats, solveEndDate, turns: (solve: Solve) => solve.moves.length,
   formatTime: (ms: number, precision: 2 | 3 = 2) => (ms / 1000).toFixed(precision),
 }));
 await jest.unstable_mockModule('../CubeView', () => ({
@@ -102,12 +102,22 @@ function historySolve(number: number, duration: number, count: number, session =
   return {
     version: 1, id: String(number), session, createdAt: new Date(Date.UTC(2026, 0, 1, 0, 0, number)).toISOString(),
     device: 'Test cube', scramble: 'R', startFacelets: SOLVED, duration, status, reason: '', timingBasis: 'host',
-    moves: Array.from({ length: count }, () => ({ move: 'R', hostTime: 0, elapsed: 0, localTimestamp: null, cubeTimestamp: null })), orientations: [],
+    moves: Array.from({ length: count }, () => ({ move: 'R', hostTime: 0, elapsed: 0, localTimestamp: null, cubeTimestamp: null })),
   };
 }
 function historyNumbers() {
   return Array.from(container.querySelectorAll('[aria-label="Solve history"] tbody tr')).map(row => Number(row.firstElementChild!.textContent));
 }
+
+test('reads backup files larger than 10 MB instead of rejecting them before import', async () => {
+  const text = jest.fn<() => Promise<string>>().mockResolvedValue('backup contents');
+  const input = container.querySelector<HTMLInputElement>('input[type="file"]')!;
+  Object.defineProperty(input, 'files', { value: [{ size: 10_000_001, text }] });
+  await act(async () => input.dispatchEvent(new Event('change', { bubbles: true })));
+  expect(text).toHaveBeenCalledTimes(1);
+  expect(save).toHaveBeenCalledWith([]);
+  expect(container.textContent).not.toContain('import limit');
+});
 
 async function timedApp(solves: Solve[] = []) {
   await act(async () => root.unmount());
@@ -116,6 +126,93 @@ async function timedApp(solves: Solve[] = []) {
   root = createRoot(container);
   await act(async () => root.render(createElement(App)));
 }
+
+test('the first daily attempt shows an independently dismissible fire with current and best streaks, only once per day', async () => {
+  const previous = Array.from({ length: 7 }, (_, i) => ({
+    ...historySolve(i, 1000, 2, i % 2 ? 'Other' : 'Default'),
+    createdAt: new Date(2026, 9, 1 + i, 12).toISOString(),
+  }));
+  await timedApp(previous);
+  jest.setSystemTime(new Date(2026, 10, 2, 12));
+  await finishFirst();
+  await act(async () => jest.advanceTimersByTime(500));
+  expect(container.querySelector('[aria-label="Daily streak"]')).toBeNull();
+  await act(async () => jest.advanceTimersByTime(1));
+  const notice = container.querySelector('[aria-label="Daily streak"]')!;
+  expect(notice.textContent).toContain('Congratulations!');
+  expect(notice.textContent).toContain('Daily Streak: 1');
+  expect(notice.textContent).toContain('Best Streak: 7');
+  expect(notice.querySelector('svg')?.getAttribute('aria-hidden')).toBe('true');
+  expect(notice.querySelector('.streak-flame')).not.toBeNull();
+  expect(notice.closest('.timer-panel')).toBeNull();
+  expect(container.querySelector('[aria-label="Personal best"]')).not.toBeNull();
+  await click('Dismiss daily streak');
+  expect(container.querySelector('[aria-label="Daily streak"]')).toBeNull();
+  expect(container.querySelector('[aria-label="Personal best"]')).not.toBeNull();
+
+  await act(async () => resolveNext('F L2'));
+  await act(async () => { move('F', 2000); move('L2', 2100); move('L2', 2200); move("F'", 2400); });
+  await act(async () => jest.advanceTimersByTime(501));
+  expect(container.querySelector('[aria-label="Daily streak"]')).toBeNull();
+  jest.setSystemTime(new Date(2026, 10, 3, 12));
+  await act(async () => { move('B', 3000); move('R2', 3100); move('R2', 3200); move("B'", 3400); });
+  await act(async () => jest.advanceTimersByTime(501));
+  expect(container.querySelector('[aria-label="Daily streak"]')?.textContent).toContain('Daily Streak: 2');
+  expect(container.querySelector('[aria-label="Daily streak"]')?.textContent).toContain('Best Streak: 7');
+  await click('Dismiss daily streak');
+  jest.setSystemTime(new Date(2026, 10, 5, 12));
+  await act(async () => { move('B', 4000); move('R2', 4100); move('R2', 4200); move("B'", 4400); });
+  await act(async () => jest.advanceTimersByTime(501));
+  expect(container.querySelector('[aria-label="Daily streak"]')?.textContent).toContain('Daily Streak: 1');
+  expect(container.querySelector('[aria-label="Daily streak"]')?.textContent).toContain('Best Streak: 7');
+});
+
+test('active attempts do not notify, but the first DNF does count toward the daily streak', async () => {
+  await timedApp();
+  await click('Connect cube');
+  await act(async () => { move('R', 100); move('U2', 200); move('U', 300); });
+  await act(async () => jest.advanceTimersByTime(501));
+  expect(container.querySelector('[aria-label="Daily streak"]')).toBeNull();
+  await click('Abort solve');
+  await act(async () => jest.advanceTimersByTime(501));
+  expect(save.mock.calls.at(-1)![0][0].status).toBe('incomplete');
+  expect(container.querySelector('[aria-label="Daily streak"]')?.textContent).toContain('Daily Streak: 1');
+  expect(container.querySelector('[aria-label="Personal best"]')).toBeNull();
+});
+
+test.each(['reload', 'import'])('an existing DNF today in another session suppresses streak notifications after %s', async source => {
+  await timedApp();
+  jest.setSystemTime(new Date(2026, 10, 2, 12));
+  const solve = { ...historySolve(1, 1000, 2, 'Other', 'incomplete'), createdAt: new Date(2026, 10, 2, 8).toISOString() };
+  if (source === 'reload') await showHistory([solve]);
+  else {
+    recovered = [solve];
+    const input = container.querySelector<HTMLInputElement>('input[type="file"]')!;
+    Object.defineProperty(input, 'files', { value: [{ text: async () => 'backup' }] });
+    await act(async () => input.dispatchEvent(new Event('change', { bubbles: true })));
+  }
+  await act(async () => jest.advanceTimersByTime(501));
+  expect(container.querySelector('[aria-label="Daily streak"]')).toBeNull();
+  await finishFirst();
+  await act(async () => jest.advanceTimersByTime(501));
+  expect(container.querySelector('[aria-label="Daily streak"]')).toBeNull();
+});
+
+test('the penalty-window delay across midnight does not move the first attempt into the next day', async () => {
+  await timedApp();
+  jest.setSystemTime(new Date(2026, 10, 1, 23, 59, 58));
+  await finishFirst();
+  jest.setSystemTime(new Date(2026, 10, 2, 0, 0, 1));
+  await act(async () => jest.advanceTimersByTime(501));
+  expect(container.querySelector('[aria-label="Daily streak"]')?.textContent).toContain('Daily Streak: 1');
+  await act(async () => resolveNext('F L2'));
+  await act(async () => { move('F', 2000); move('L2', 2100); move('L2', 2200); move("F'", 2400); });
+  await act(async () => jest.advanceTimersByTime(501));
+  const notices = container.querySelectorAll('[aria-label="Daily streak"]');
+  expect(notices).toHaveLength(2);
+  expect(notices[1].textContent).toContain('Daily Streak: 2');
+  expect(notices[1].textContent).toContain('Best Streak: 2');
+});
 
 test('new PB celebrations wait for the penalty window and stay until dismissed without shifting the timer', async () => {
   await timedApp();
@@ -177,7 +274,7 @@ test('successive PBs stay separately visible, while long-average notices reset a
   await act(async () => jest.advanceTimersByTime(501));
   expect(container.querySelector('[aria-label="Personal best"]')?.textContent).toContain('Single: 0.60s');
   for (const name of ['Ao5', 'Ao12', 'Ao100', 'Ao1000']) {
-    expect(container.querySelector('[aria-label="Personal best notifications"]')?.textContent).toContain(`${name}:`);
+    expect(container.querySelector('[aria-label="Solve notifications"]')?.textContent).toContain(`${name}:`);
   }
   expect(container.querySelectorAll('[aria-label="Personal best"]')).toHaveLength(5);
   await act(async () => resolveNext('F L2'));
@@ -220,7 +317,7 @@ test.each([
   localStorage.setItem('timer-pb-daily-records', saved);
   await finishFirst();
   await act(async () => jest.advanceTimersByTime(501));
-  const text = container.querySelector('[aria-label="Personal best notifications"]')!.textContent!;
+  const text = container.querySelector('[aria-label="Solve notifications"]')!.textContent!;
   expect(text).toContain('Single: 0.60s');
   expect(text).toContain('Ao5:');
   expect(text).toContain('Ao12:');
@@ -288,9 +385,10 @@ test.each([1000, 3000])('penalty updates are included before comparing a solve a
   const celebration = container.querySelector('[aria-label="Personal best"]');
   if (previous === 1000) expect(celebration).toBeNull();
   else expect(celebration?.textContent).toContain('Single: 2.60s');
+  expect(container.querySelectorAll('[aria-label="Daily streak"]')).toHaveLength(1);
 });
 
-test('a premature completion invalidated within the penalty window does not celebrate', async () => {
+test('a premature completion invalidated within the penalty window counts as a daily attempt but not a PB', async () => {
   await timedApp();
   await click('Connect cube');
   await act(async () => { move('R', 100, 1); move('U2', 200, 2); move('U2', 300, 3); move("R'", 900, 4); });
@@ -300,6 +398,7 @@ test('a premature completion invalidated within the penalty window does not cele
   await act(async () => jest.advanceTimersByTime(501));
   expect(container.querySelector('[aria-label="Personal best"]')).toBeNull();
   expect(save.mock.calls.at(-1)![0][0].status).toBe('incomplete');
+  expect(container.querySelector('[aria-label="Daily streak"]')?.textContent).toContain('Daily Streak: 1');
 });
 
 test('loading existing records does not replay PB celebrations', async () => {
@@ -352,6 +451,36 @@ test('average PB notifications retain their original window after later solves a
   const rows = container.querySelectorAll('[aria-label="Average solves"] tbody tr');
   expect(Array.from(rows, row => row.children[0].textContent)).toEqual(['2', '3', '4', '5', '6']);
   expect(Array.from(rows, row => row.children[1].textContent)).toEqual(['(18.00s)', '16.00s', '14.00s', '12.00s', '(0.60s)']);
+});
+
+test('current and best singles open their exact replays across session, penalty, rounding and history limits', async () => {
+  const best = historySolve(1, 8000.001, 2), current = historySolve(103, 12000, 2);
+  await showHistory([
+    best, ...Array.from({ length: 100 }, (_, i) => historySolve(i + 2, 10000, 2)),
+    { ...historySolve(102, 6000.002, 2), penalty: 2000 }, current,
+    historySolve(104, 1, 2, 'Other'), historySolve(105, 1, 2, 'Default', 'active'),
+  ]);
+  expect(historyNumbers()).not.toContain(1);
+  await click('Time');
+  for (const [kind, solve] of [['current', current], ['best', best]] as const) {
+    await click(`View ${kind} Single`);
+    expect(container.querySelector('[aria-label="Solve replay"]')?.getAttribute('data-solve-id')).toBe(solve.id);
+    expect(container.querySelector('.average-dialog')).toBeNull();
+    await click('Close replay');
+    expect(container.querySelector('[aria-label="Solve replay"]')).toBeNull();
+  }
+});
+
+test.each([false, true])('single replay links include a current DNF when all attempts are DNFs: %s', async allDnf => {
+  const previous = historySolve(1, 10000, 2, 'Default', allDnf ? 'incomplete' : 'complete');
+  const current = historySolve(2, 1, 2, 'Default', 'incomplete');
+  await showHistory([previous, current]);
+  expect(container.querySelector('[aria-label="View current Single"]')?.textContent).toBe('DNF');
+  for (const [kind, solve] of [['current', current], ['best', allDnf ? current : previous]] as const) {
+    await click(`View ${kind} Single`);
+    expect(container.querySelector('[aria-label="Solve replay"]')?.getAttribute('data-solve-id')).toBe(solve.id);
+    await click('Close replay');
+  }
 });
 
 test.each([5, 12, 100, 1000])('current and best Ao%s open their exact windows with the correct number of exclusions', async count => {
@@ -475,10 +604,10 @@ test('history numbers every non-active attempt chronologically within its sessio
     historySolve(2, 2000, 2, 'Default', 'incomplete'), historySolve(5, 0, 0, 'Default', 'active'),
   ]);
   expect(historyNumbers()).toEqual([3, 2, 1]);
-  expect(container.querySelector('th[aria-sort="descending"]')?.textContent).toBe('Solve number');
-  await click('Solve number');
+  expect(container.querySelector('th[aria-sort="descending"]')?.textContent).toBe('Solve');
+  await click('Solve');
   expect(historyNumbers()).toEqual([1, 2, 3]);
-  await click('Solve number');
+  await click('Solve');
   expect(historyNumbers()).toEqual([3, 2, 1]);
 });
 
@@ -566,21 +695,23 @@ test('double-turn and ready instructions stay hidden without changing first-turn
   expect(save.mock.calls.flatMap(([solves]) => solves).at(-1)?.status).toBe('complete');
 });
 
-test('scramble keeps completed moves, replaces unfinished moves with red corrections, and marks partial turns', async () => {
+test('scramble keeps completed green moves, replaces pending moves with red corrections, and restores them after undo', async () => {
   await click('Connect cube');
   const scramble = container.querySelector('[aria-label="Scramble"]')!;
   expect(scramble.closest('section')!.querySelector('h2')).toBeNull();
   await act(async () => move('R', 100));
   expect(scramble.querySelector('.done')?.textContent).toBe('R');
   await act(async () => { move('F', 200); move('L', 300); });
-  expect(scramble.querySelector('.done')?.textContent).toBe('R');
+  expect(Array.from(scramble.querySelectorAll('.move:not(.correction)'), element => element.textContent)).toEqual(['R']);
+  expect(scramble.querySelector('.move:not(.done):not(.correction)')).toBeNull();
   expect(Array.from(scramble.querySelectorAll('.correction')).map(move => move.textContent)).toEqual(["L'", "F'"]);
   expect(scramble.querySelector('.current')?.classList.contains('correction')).toBe(true);
-  expect(scramble.textContent).not.toContain('U2');
+  expect(scramble.querySelector('.move:not(.correction)')!.compareDocumentPosition(scramble.querySelector('[aria-label="Correction moves"]')!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   await act(async () => move("L'", 400));
   expect(scramble.querySelector('[aria-label="Correction moves"]')?.textContent).toBe("F'");
   await act(async () => move("F'", 500));
   expect(scramble.querySelector('.correction')).toBeNull();
+  expect(scramble.querySelector('.done')?.textContent).toBe('R');
   expect(scramble.querySelector('.current')?.textContent).toBe('U2');
   await act(async () => move('U', 600));
   expect(scramble.querySelector('.current.partial')?.textContent).toBe('U2');
@@ -602,7 +733,8 @@ test('scramble highlights the first pending move while a commuting later move tu
   expect(Array.from(scramble.querySelectorAll('.done')).map(move => move.textContent)).toEqual(['L']);
   expect(scramble.querySelector('.correction')).toBeNull();
   await act(async () => move('F', 200));
-  expect(Array.from(scramble.querySelectorAll('.done')).map(move => move.textContent)).toEqual(['L']);
+  expect(Array.from(scramble.querySelectorAll('.move:not(.correction)'), element => element.textContent)).toEqual(['L']);
+  expect(scramble.querySelector('.move:not(.done):not(.correction)')).toBeNull();
   expect(scramble.querySelector('.correction')!.textContent).toBe("F'");
   await act(async () => move("F'", 300));
   expect(scramble.querySelector('.current')!.textContent).toBe('R');
@@ -612,7 +744,7 @@ test('scramble highlights the first pending move while a commuting later move tu
   expect(Array.from(scramble.querySelectorAll('.done')).map(move => move.textContent)).toEqual(['R', 'L']);
   await act(async () => move('U', 500));
   expect(scramble.querySelector('.current')).toBeNull();
-  expect(Array.from(scramble.querySelectorAll('.done')).map(move => move.textContent)).toEqual(['R', 'L', 'U']);
+  expect(Array.from(scramble.querySelectorAll('.done'), element => element.textContent)).toEqual(['R', 'L', 'U']);
   expect(container.querySelector('.timer-panel')!.classList.contains('ready')).toBe(true);
   expect(save).not.toHaveBeenCalled();
 });
@@ -648,9 +780,9 @@ test('the scramble refresh icon replaces a partially applied scramble with valid
   expect(solution).toHaveBeenCalledWith(initial);
   expect(button.disabled).toBe(false);
   expect(container.querySelector('[aria-label="Live 3x3 cube state"]')!.getAttribute('data-facelets')).toBe(initial);
-  expect(Array.from(container.querySelectorAll('.scramble .move')).map(move => move.textContent)).toEqual(['F', 'L2']);
+  expect(Array.from(container.querySelectorAll('.scramble .move'), element => element.textContent)).toEqual(["R'"]);
   expect(container.querySelector('.scramble .done')).toBeNull();
-  expect(container.querySelector('.timer-panel > p .current')!.textContent).toBe("R'");
+  expect(container.querySelector('[aria-label="Path to solved"] .current')!.textContent).toBe("R'");
   expect(save).not.toHaveBeenCalled();
   await act(async () => { move("R'", 200); move('F', 300); move('L2', 400); });
   expect(button.disabled).toBe(false);
@@ -720,7 +852,7 @@ test.each(['D', "D'"])('a single %s partially highlights D2 in U2 D2 without mov
   await act(async () => move('U2', 500));
   expect(scramble.querySelector('.current')).toBeNull();
   expect(scramble.querySelector('.partial')).toBeNull();
-  expect(Array.from(scramble.querySelectorAll('.done')).map(move => move.textContent)).toEqual(['U2', 'D2']);
+  expect(Array.from(scramble.querySelectorAll('.done'), element => element.textContent)).toEqual(['U2', 'D2']);
   expect(container.querySelector('.timer-panel')!.classList.contains('ready')).toBe(true);
   expect(save).not.toHaveBeenCalled();
 });
@@ -742,6 +874,164 @@ test('partial highlights apply only to the current commuting block and recover a
   expect(scramble.querySelectorAll('.partial')).toHaveLength(1);
   expect(scramble.querySelector('.partial')!.textContent).toBe('D2');
   expect(scramble.querySelector('.correction')).toBeNull();
+});
+
+test('ten remaining corrections replace a partial scramble with fresh solver guidance, repeatedly preserving the original scramble', async () => {
+  await click('Connect cube');
+  const stray = movesOf("F U F' U' F U F' U' F U"), original = ['R', ...stray];
+  const firstSetup = simplifyMoves([...original].reverse().map(inverse));
+  const secondStray = Array.from({ length: 5 }, () => ['R', 'B']).flat();
+  const secondState = [...original, ...firstSetup.slice(0, 2), ...secondStray];
+  const secondSetup = simplifyMoves([...secondState].reverse().map(inverse));
+  let resolveSetup: (moves: string[]) => void = () => {};
+  const solution = jest.mocked(cube.solution).mockResolvedValueOnce(firstSetup).mockImplementationOnce(() => new Promise(resolve => { resolveSetup = resolve; }));
+  const shownPath = () => Array.from(container.querySelectorAll('[aria-label="Path to solved"] .move'), element => element.textContent);
+  let host = 100;
+  const feed = (moves: string[]) => moves.forEach(notation => move(notation, host += 100));
+  await act(async () => feed(['R', ...stray.slice(0, 9)]));
+  expect(solution).not.toHaveBeenCalled();
+  expect(container.querySelectorAll('.scramble .correction')).toHaveLength(9);
+  expect(Array.from(container.querySelectorAll('.scramble .move:not(.correction)'), element => element.textContent)).toEqual(['R']);
+  expect(container.querySelector('.scramble .move:not(.done):not(.correction)')).toBeNull();
+  await act(async () => feed(stray.slice(9)));
+  expect(solution).toHaveBeenCalledTimes(1);
+  expect(solution).toHaveBeenLastCalledWith(cube.facelets(cube.solved().applyAlg(original.join(' '))));
+  expect(shownPath()).toEqual(firstSetup);
+  expect(container.querySelector('[aria-label="Original scramble"]')).toBeNull();
+  expect(container.querySelector('.scramble .correction')).toBeNull();
+  expect(generate).toHaveBeenCalledTimes(1);
+  expect(save).not.toHaveBeenCalled();
+
+  await act(async () => feed(firstSetup.slice(0, 2)));
+  const remaining = firstSetup.slice(2);
+  const completed = firstSetup.slice(0, 2);
+  expect(shownPath()).toEqual(firstSetup);
+  expect(Array.from(container.querySelectorAll('[aria-label="Path to solved"] .done'), element => element.textContent)).toEqual(completed);
+  await act(async () => feed(['R']));
+  expect(shownPath()).toEqual(completed);
+  expect(container.querySelector('[aria-label="Path to solved"] .move:not(.done)')).toBeNull();
+  expect(container.querySelector('[aria-label="Path to solved"] .current')).toBeNull();
+  expect(container.querySelector('.scramble .current.correction')).not.toBeNull();
+  expect(container.querySelector('[aria-label="Path to solved"]')!.compareDocumentPosition(container.querySelector('[aria-label="Correction moves"]')!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  await act(async () => feed(["R'"]));
+  expect(container.querySelector('.scramble .correction')).toBeNull();
+  expect(shownPath()).toEqual(firstSetup);
+  expect(container.querySelector('[aria-label="Path to solved"] .current')?.textContent).toBe(remaining[0]);
+  for (let i = 0; i < 9; i++) {
+    await act(async () => feed([secondStray[i]]));
+    expect(solution).toHaveBeenCalledTimes(1);
+    expect(shownPath()).toEqual(completed);
+    expect(container.querySelector('[aria-label="Path to solved"] .move:not(.done)')).toBeNull();
+    expect(container.querySelectorAll('.scramble .correction')).toHaveLength(i + 1);
+    expect(container.querySelector('[aria-label="Original scramble"]')).toBeNull();
+  }
+  await act(async () => feed(secondStray.slice(9)));
+  expect(solution).toHaveBeenCalledTimes(2);
+  expect(solution).toHaveBeenLastCalledWith(cube.facelets(cube.solved().applyAlg(secondState.join(' '))));
+  expect(shownPath()).toEqual(completed);
+  expect(container.querySelector('.scramble .correction')).toBeNull();
+  expect(container.textContent).toContain('Finding moves to return the cube to solved...');
+  await act(async () => resolveSetup(secondSetup));
+  expect(shownPath()).toEqual(secondSetup);
+  expect(container.querySelector('[aria-label="Path to solved"] .done')).toBeNull();
+  expect(container.querySelector('.scramble .correction')).toBeNull();
+  await act(async () => feed(secondSetup));
+  expect(container.querySelector('[aria-label="Live 3x3 cube state"]')?.getAttribute('data-facelets')).toBe(SOLVED);
+  expect(container.querySelector('[aria-label="Path to solved"]')).toBeNull();
+  expect(container.querySelector('.scramble .current')?.textContent).toBe('R');
+  expect(generate).toHaveBeenCalledTimes(1);
+  expect(save).not.toHaveBeenCalled();
+  await act(async () => feed(['R', 'U2']));
+  expect(container.querySelector('.timer-panel')?.classList.contains('ready')).toBe(true);
+  expect(Array.from(container.querySelectorAll('[aria-label="Original scramble"] .done'), element => element.textContent)).toEqual(['R', 'U2']);
+  expect(save).not.toHaveBeenCalled();
+  await act(async () => feed(['U2', "R'"]));
+  expect(save.mock.calls.at(-1)![0][0]).toMatchObject({ status: 'complete', scramble: 'R U2' });
+});
+
+test('moves buffered during rerouting can trigger another fresh solution without losing turns or counters', async () => {
+  await click('Connect cube');
+  const stray = movesOf("F U F' U' F U F' U' F U"), firstState = ['R', ...stray];
+  const queuedStray = Array.from({ length: 5 }, () => ['R', 'B']).flat(), finalState = [...firstState, ...queuedStray];
+  const firstSetup = simplifyMoves([...firstState].reverse().map(inverse)), finalSetup = simplifyMoves([...finalState].reverse().map(inverse));
+  let resolveSetup: (moves: string[]) => void = () => {};
+  const solution = jest.mocked(cube.solution).mockImplementationOnce(() => new Promise(resolve => { resolveSetup = resolve; })).mockResolvedValueOnce(finalSetup);
+  let serial = 0;
+  const feed = (moves: string[]) => moves.forEach(notation => { serial++; move(notation, serial * 100, serial); });
+  await act(async () => feed(firstState));
+  expect(solution).toHaveBeenCalledTimes(1);
+  expect(container.textContent).toContain('Finding moves to return the cube to solved...');
+  expect(container.querySelector('.timer-panel .move')).toBeNull();
+  await act(async () => feed(queuedStray));
+  expect(solution).toHaveBeenCalledTimes(1);
+  await act(async () => resolveSetup(firstSetup));
+  expect(solution).toHaveBeenCalledTimes(2);
+  const facelets = cube.facelets(cube.solved().applyAlg(finalState.join(' ')));
+  expect(solution).toHaveBeenLastCalledWith(facelets);
+  expect(container.querySelector('[aria-label="Live 3x3 cube state"]')?.getAttribute('data-facelets')).toBe(facelets);
+  await act(async () => emit({ type: 'FACELETS', timestamp: serial * 100, facelets, serial }));
+  expect(container.querySelector('[role="alert"]')).toBeNull();
+  expect(Array.from(container.querySelectorAll('[aria-label="Path to solved"] .move'), element => element.textContent)).toEqual(finalSetup);
+  await act(async () => feed(finalSetup));
+  expect(physicalFacelets).toBe(SOLVED);
+  expect(container.querySelector('.scramble .current')?.textContent).toBe('R');
+  expect(generate).toHaveBeenCalledTimes(1);
+  expect(save).not.toHaveBeenCalled();
+});
+
+test('disconnecting discards a pending automatic recovery instead of installing stale guidance', async () => {
+  await click('Connect cube');
+  const state = movesOf("R F U F' U' F U F' U' F U");
+  let resolveSetup: (moves: string[]) => void = () => {};
+  jest.mocked(cube.solution).mockImplementationOnce(() => new Promise(resolve => { resolveSetup = resolve; }));
+  await act(async () => state.forEach((notation, i) => move(notation, (i + 1) * 100)));
+  await click('Disconnect');
+  await act(async () => resolveSetup([...state].reverse().map(inverse)));
+  expect(container.querySelector('[aria-label="Path to solved"]')).toBeNull();
+  expect(container.textContent).toContain('Cube disconnected.');
+  expect(save).not.toHaveBeenCalled();
+});
+
+test('an automatic recovery solver failure shows the error without arming or recording a solve', async () => {
+  await click('Connect cube');
+  const state = movesOf("R F U F' U' F U F' U' F U");
+  const solution = jest.mocked(cube.solution).mockRejectedValueOnce(new Error('Local solver failed'));
+  await act(async () => state.forEach((notation, i) => move(notation, (i + 1) * 100)));
+  expect(solution).toHaveBeenCalledTimes(1);
+  expect(container.querySelector('[role="alert"]')?.textContent).toContain('Local solver failed');
+  expect(container.querySelector('.timer-panel')?.classList.contains('ready')).toBe(false);
+  expect(container.querySelector<HTMLButtonElement>('[aria-label="New scramble"]')?.disabled).toBe(true);
+  expect(save).not.toHaveBeenCalled();
+});
+
+test('ten corrections during DNF recovery also replan without changing the recorded attempt', async () => {
+  await click('Connect cube');
+  await act(async () => { move('R', 100); move('U2', 200); move('U', 300); });
+  await click('Abort solve');
+  const recorded = save.mock.calls.at(-1)![0][0], writes = save.mock.calls.length;
+  await act(async () => move('U', 350));
+  expect(container.querySelector('[aria-label="Path to solved"] .done')?.textContent).toBe('U');
+  const stray = Array.from({ length: 5 }, () => ['F', 'R']).flat(), state = ['R', ...stray];
+  const setup = simplifyMoves([...state].reverse().map(inverse));
+  const solution = jest.mocked(cube.solution).mockResolvedValueOnce(setup);
+  for (let i = 0; i < 9; i++) {
+    await act(async () => move(stray[i], 400 + i * 100));
+    expect(solution).toHaveBeenCalledTimes(1);
+    expect(Array.from(container.querySelectorAll('.scramble .move:not(.correction)'), element => element.textContent)).toEqual(['U']);
+    expect(container.querySelector('[aria-label="Path to solved"] .move:not(.done)')).toBeNull();
+    expect(container.querySelector('.scramble .current:not(.correction)')).toBeNull();
+  }
+  await act(async () => move(stray[9], 1300));
+  expect(solution).toHaveBeenLastCalledWith(cube.facelets(cube.solved().applyAlg(state.join(' '))));
+  expect(container.querySelector('.timer-panel')?.textContent).toContain('Return the cube to solved');
+  expect(container.querySelector('.scramble .correction')).toBeNull();
+  expect(save.mock.calls).toHaveLength(writes);
+  expect(save.mock.calls.at(-1)![0][0]).toEqual(recorded);
+  expect(generate).toHaveBeenCalledTimes(1);
+  await act(async () => setup.forEach((notation, i) => move(notation, 1500 + i * 100)));
+  expect(physicalFacelets).toBe(SOLVED);
+  expect(generate).toHaveBeenCalledTimes(2);
+  expect(save.mock.calls).toHaveLength(writes);
 });
 
 test('red corrections use shortened undo moves and disappear once the mistake is corrected', async () => {
@@ -1035,10 +1325,12 @@ test('session summary shows current and best singles plus all four average sizes
   expect(records).not.toBe(history);
   expect(records.querySelector('h2')!.textContent).toBe('Current / records');
   expect(history.querySelector('h2')!.textContent).toBe('Session history');
-  expect(Array.from(history.querySelectorAll('thead th')).map(cell => cell.textContent)).toEqual(['Solve number', 'Time', 'Turns', 'TPS', 'View']);
+  expect(Array.from(history.querySelectorAll('thead th')).map(cell => cell.textContent)).toEqual(['Solve', 'Time', 'Turns', 'TPS', 'View']);
   expect(history.querySelectorAll('tbody tr:first-child td')).toHaveLength(5);
   expect(history.querySelector('tbody button')?.textContent).toBe('View');
   expect(history.querySelector('input[type="file"]')).not.toBeNull();
+  expect(history.querySelector('input[type="file"]')!.closest('label')!.hidden).toBe(true);
+  expect(Array.from(history.querySelectorAll('button')).find(button => button.textContent === 'Export JSON')!.hidden).toBe(true);
   expect(records.querySelector('input[type="file"]')).toBeNull();
   const rows = Array.from(container.querySelectorAll('[aria-label="Session statistics"] tbody tr'));
   expect(rows.map(row => row.querySelector('th')!.textContent)).toEqual(['Single', 'Ao5', 'Ao12', 'Ao100', 'Ao1000']);

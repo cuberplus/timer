@@ -3,8 +3,20 @@ import { Cube, isMove, movesOf } from './puzzle';
 import { analyzeCFOP, CFOP_STEPS, cfopFrame, cfopTiming, elapsedAt } from './cfop';
 
 const database = (): Promise<IDBDatabase> => new Promise((resolve, reject) => {
-  const request = indexedDB.open('smart-cube-timer', 1);
-  request.onupgradeneeded = () => request.result.createObjectStore('solves', { keyPath: 'id' });
+  const request = indexedDB.open('smart-cube-timer', 2);
+  request.onupgradeneeded = event => {
+    if (event.oldVersion === 0) request.result.createObjectStore('solves', { keyPath: 'id' });
+    else {
+      const requestCursor = request.transaction!.objectStore('solves').openCursor();
+      requestCursor.onsuccess = () => {
+        const cursor = requestCursor.result;
+        if (!cursor) return;
+        const solve = cursor.value as Solve & { orientations?: object };
+        if ('orientations' in solve) { delete solve.orientations; cursor.update(solve); }
+        cursor.continue();
+      };
+    }
+  };
   request.onsuccess = () => resolve(request.result);
   request.onerror = () => reject(request.error ?? new Error('Cannot open local storage.'));
 });
@@ -37,12 +49,28 @@ export async function readSolves(): Promise<Solve[]> {
 const finite = (n: number): boolean => typeof n === 'number' && Number.isFinite(n);
 const text = (s: string, max = 1000): boolean => typeof s === 'string' && s.length <= max;
 
+// Compact tuples retain the raw data without repeating field names per sample.
+type BackupTurn = [move: string, elapsed: number, hostTime: number, localTimestamp: number | null, cubeTimestamp: number | null, serial?: number];
+type BackupSolve = Omit<Solve, 'moves'> & { moves: BackupTurn[] };
+
+function unpackSolve(solve: BackupSolve): Solve {
+  if (!solve || typeof solve !== 'object' || !Array.isArray(solve.moves)) throw new Error('Invalid solve record in backup.');
+  return {
+    ...solve,
+    moves: solve.moves.map(turn => {
+      if (!Array.isArray(turn) || (turn.length !== 5 && turn.length !== 6)) throw new Error('Invalid move timeline.');
+      const [move, elapsed, hostTime, localTimestamp, cubeTimestamp, serial] = turn;
+      return { move, elapsed, hostTime, localTimestamp, cubeTimestamp, ...(turn.length === 6 ? { serial } : {}) };
+    }),
+  };
+}
+
 export function validateBackup(json: string, cube: Cube): Solve[] {
-  if (json.length > 10_000_000) throw new Error('Backup exceeds the 10 MB import limit.');
-  const backup = JSON.parse(json) as { format: string; solves: Solve[] };
-  if (!backup || typeof backup !== 'object' || backup.format !== 'timer-v1' || !Array.isArray(backup.solves)) throw new Error('Not a Timer JSON backup.');
+  const backup = JSON.parse(json) as { format: 'timer-v1'; solves: Solve[] } | { format: 'timer-v2'; solves: BackupSolve[] };
+  if (!backup || typeof backup !== 'object' || !['timer-v1', 'timer-v2'].includes(backup.format) || !Array.isArray(backup.solves)) throw new Error('Not a Timer JSON backup.');
+  const solves = backup.format === 'timer-v2' ? backup.solves.map(unpackSolve) : backup.solves;
   const ids = new Set<string>();
-  return backup.solves.map(solve => {
+  return solves.map(solve => {
     if (!solve || typeof solve !== 'object' || solve.version !== 1 ||
         !text(solve.id, 100) || !solve.id || ids.has(solve.id) || !text(solve.session, 100) ||
         !text(solve.device, 200) || !text(solve.createdAt, 100) || !Number.isFinite(Date.parse(solve.createdAt)) ||
@@ -55,7 +83,7 @@ export function validateBackup(json: string, cube: Cube): Solve[] {
         (solve.dnfReason !== undefined && (!['solve interrupted', 'solve aborted'].includes(solve.dnfReason) || solve.status !== 'incomplete')) ||
         !['active', 'complete', 'incomplete'].includes(solve.status) ||
         !['host', 'device-fit'].includes(solve.timingBasis) ||
-        !Array.isArray(solve.moves) || !Array.isArray(solve.orientations)) throw new Error('Invalid solve record in backup.');
+        !Array.isArray(solve.moves)) throw new Error('Invalid solve record in backup.');
     ids.add(solve.id);
     const pattern = cube.parse(solve.startFacelets);
     if (!cube.equals(pattern, cube.solved().applyAlg(solve.scramble))) throw new Error('Solve start does not match its scramble.');
@@ -67,19 +95,23 @@ export function validateBackup(json: string, cube: Cube): Solve[] {
           (move.serial !== undefined && (!Number.isInteger(move.serial) || move.serial < 0)) ||
           (i === 0 ? move.elapsed !== 0 : move.elapsed < solve.moves[i - 1].elapsed)) throw new Error('Invalid move timeline.');
     });
-    solve.orientations.forEach(sample => {
-      if (!sample || typeof sample !== 'object' || !finite(sample.elapsed) || sample.elapsed < 0 ||
-          !sample.quaternion || !['x', 'y', 'z', 'w'].every(axis => finite(sample.quaternion[axis as keyof typeof sample.quaternion]))) throw new Error('Invalid orientation sample.');
-    });
     if (solve.status === 'complete' && (!solve.moves.length || !cube.isSolved(pattern.applyAlg(solve.moves.map(move => move.move).join(' '))))) throw new Error('Completed solve does not end solved.');
-    const restored: Solve = solve.status === 'active' ? { ...solve, status: 'incomplete', reason: 'Interrupted attempt recovered from backup.', dnfReason: 'solve interrupted' } : { ...solve };
+    const restored: Solve & { orientations?: object } = solve.status === 'active' ? { ...solve, status: 'incomplete', reason: 'Interrupted attempt recovered from backup.', dnfReason: 'solve interrupted' } : { ...solve };
+    delete restored.orientations;
     if (restored.penalty === 2000) restored.penaltyReason ??= 'over-turn';
     if (restored.status === 'incomplete') restored.dnfReason = getDnfReason(restored);
     return restored;
   });
 }
 
-export const backupJSON = (solves: Solve[]): string => JSON.stringify({ format: 'timer-v1', solves }, null, 2);
+export const backupJSON = (solves: Solve[]): string => JSON.stringify({
+  format: 'timer-v2',
+  solves: solves.map(({ version, id, session, createdAt, device, scramble, startFacelets, duration, inspection, penalty, penaltyReason, dnfReason, status, reason, timingBasis, moves }): BackupSolve => ({
+    version, id, session, createdAt, device, scramble, startFacelets, duration, inspection, penalty, penaltyReason, dnfReason, status, reason, timingBasis,
+    moves: moves.map(({ move, elapsed, hostTime, localTimestamp, cubeTimestamp, serial }): BackupTurn =>
+      serial === undefined ? [move, elapsed, hostTime, localTimestamp, cubeTimestamp] : [move, elapsed, hostTime, localTimestamp, cubeTimestamp, serial]),
+  })),
+});
 // Ignore sub-nanosecond rounding noise in rolling sums.
 const improves = (time: number, best: number | null): boolean => best === null || time < best - 1e-6;
 const averageValue = (solve: Solve): number => solve.status === 'complete' ? solveTime(solve) : Infinity;
@@ -161,6 +193,19 @@ export function personalBestNotifications(records: ReturnType<typeof newPersonal
     return true;
   });
 }
+export const solveEndDate = (solve: Solve): Date => new Date(Date.parse(solve.createdAt) + (solve.moves.at(-1)?.elapsed ?? solve.duration));
+export function dailyStreak(solves: Solve[], date = new Date()): { current: number; best: number; hasToday: boolean } {
+  // Compare local calendar dates without assuming every day lasts 24 hours.
+  const day = (date: Date) => Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()) / 86400000;
+  const today = day(date), days = [...new Set(solves.filter(solve => solve.status !== 'active').map(solve => day(solveEndDate(solve))))]
+    .filter(value => value <= today).sort((a, b) => a - b);
+  let current = 0, best = 0, previous = -Infinity;
+  for (const value of days) {
+    current = value === previous + 1 ? current + 1 : 1;
+    best = Math.max(best, current); previous = value;
+  }
+  return { current: previous >= today - 1 ? current : 0, best, hasToday: previous === today };
+}
 export const turns = (solve: Solve): number => solve.moves.reduce((n, move) => n + (move.move.includes('2') ? 2 : 1), 0);
 export const formatTime = (milliseconds: number, precision: 2 | 3 = 2): string => (milliseconds / 1000).toFixed(precision);
 
@@ -189,7 +234,7 @@ export function cubeastCSV(solves: Solve[], cube: Cube): string {
       const moves = solve.moves.slice(start, end), { end: cumulative, time, recognition, execution } = cfopTiming(solve, analysis.ends, i);
       const step: Record<string, string | number | boolean> = {
         moves: moves.map(move => frame(move.move)).join(' '), recorded_moves: moves.map((move, j) => `${frame(move.move)}[${Math.round(elapsedAt(solve, start + j + 1))}]`).join(' '),
-        skipped: start === end, has_turns: moves.length > 0, time, cumulative_time: cumulative,
+        case: analysis.cases[i], skipped: start === end, has_turns: moves.length > 0, time, cumulative_time: cumulative,
         recognition_time: recognition, execution_time: execution, slice_turns: moves.length, face_turns: moves.length,
         quarter_turns: turns({ ...solve, moves }), turns_per_second: time > 0 ? (moves.length * 1000 / time).toFixed(2) : '',
       };

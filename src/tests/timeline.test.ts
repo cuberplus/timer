@@ -17,7 +17,7 @@ beforeEach(() => {
   solve = {
     version: 1, id: 'timeline-fixture', session: 'Test', createdAt: new Date().toISOString(), device: 'Test',
     scramble, startFacelets: cube.facelets(cube.solved().applyAlg(scramble)), duration: 0,
-    status: 'active', reason: '', timingBasis: 'host', moves: [], orientations: [],
+    status: 'active', reason: '', timingBasis: 'host', moves: [],
   };
 });
 afterEach(async () => { await act(async () => root.unmount()); container.remove(); });

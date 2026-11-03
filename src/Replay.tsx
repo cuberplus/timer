@@ -14,7 +14,7 @@ export function Replay({ cube, solve, close, precision = 2 }: { cube: Cube; solv
   useEffect(() => { dialog.current?.showModal(); }, []);
   const dismiss = () => { dialog.current?.close(); close(); };
   const steps = useMemo(() => {
-    const { ends } = analyzeCFOP(solve, cube);
+    const { ends, cases } = analyzeCFOP(solve, cube);
     return CFOP_STEPS.map((name, step) => {
       const start = step ? ends[step - 1] ?? solve.moves.length : 0;
       const end = step === 6 ? solve.moves.length : ends[step] ?? solve.moves.length;
@@ -27,6 +27,7 @@ export function Replay({ cube, solve, close, precision = 2 }: { cube: Cube; solv
       }
       return {
         name: name.replace('Slot', 'Pair'),
+        case: !cases[step] ? '' : cases[step] === 'Solved' ? 'Solved' : step === 6 ? `${cases[step]} perm` : `${step === 5 ? 'OLL' : 'F2L'} ${cases[step]}`,
         empty: step > ends.length ? 'Not reached' : ends[step] === undefined ? 'No moves recorded' : 'Skipped',
         groups: groups.map(group => ({ ...group, move: group.notation[0] + ['4', '', '2', "'"][(group.amount % 4 + 4) % 4] })),
       };
@@ -56,7 +57,10 @@ export function Replay({ cube, solve, close, precision = 2 }: { cube: Cube; solv
     </div>
     <input className="form-range mt-3" type="range" min={0} max={solve.moves.length} value={position} aria-label="Replay move" onChange={event => { setPlaying(false); setPosition(Number(event.target.value)); }} />
     <div className="move-timeline" role="group" aria-label="Solution steps">{steps.map(step => <div key={step.name} role="group" aria-label={`${step.name} solution`} className="mb-2">
-      <h3 className="replay-step-name">{step.name}</h3>
+      <div className="d-flex align-items-baseline gap-2">
+        <h3 className="replay-step-name">{step.name}</h3>
+        {step.case && <span className="badge text-bg-secondary" aria-label={`${step.name} case`}>{step.case}</span>}
+      </div>
       {step.groups.length ? step.groups.map(group => {
         const current = position === 0 ? group.start === 0 : group.start < position && position <= group.end;
         return <button key={group.start} className={`move ${group.end <= position ? 'done' : ''} ${current ? 'current' : ''} ${current && position > group.start && position < group.end ? 'partial' : ''}`}

@@ -43,6 +43,19 @@ explicit permission.
 4. For a mistake, guide inverse moves back to the last confirmed checkpoint.
    From an arbitrary synchronized state, provide a local solver-generated setup
    back to solved before the displayed scramble. Recompute guidance after resync.
+   At 10 remaining simplified correction moves, recompute a local solution to
+   solved and restart the original scramble without generating a replacement.
+   Repeat at the same threshold if the user strays during the new setup or DNF
+   recovery. Buffer incoming events through the existing preparation pipeline.
+   Display only the active sequence: the original scramble or the return path.
+   Keep completed moves green and visible. Mistakes hide unfinished moves and
+   replace them with red corrections after the completed moves; undoing mistakes
+   restores unfinished moves. While recalculating, show only completed moves
+   from the previous return path, if available. Use the scramble font for all
+   guidance moves and highlight corrections until the mistake is undone.
+   Restore the original scramble at solved; keep completed sequences green
+   until the next sequence begins.
+   Use the existing fast solver, without claiming mathematical optimality.
 5. Arm only when the cube matches the full scramble. Inspection is unlimited.
    The last scramble turn does not start the timer. The next face turn starts it
    and is recorded as the first solve move.
@@ -62,7 +75,7 @@ timing, recording, and state transitions. React renders snapshots; animation
 must not determine timing or event order.
 
 Keep raw reported face turns, host monotonic timestamps, optional device
-timestamps/counters, and optional orientation samples. Preserve repetitions.
+timestamps/counters. Discard unused gyro/orientation events. Preserve repetitions.
 Derive replay notation, turn count, and TPS separately. Live timing uses
 `performance.now()`. Where sufficiently trustworthy paired timestamps exist,
 fit device time to the host clock for finalized timing, retaining both clocks.
@@ -88,8 +101,8 @@ Replay includes play/pause, speed selection, and move stepping. A clearly labele
 simulated cube uses the same engine and persistence path for development/testing.
 
 IndexedDB stores versioned solve records: identifier, session name, creation date,
-device, scramble, starting state, duration, integrity, timing basis, raw moves,
-and optional orientation samples. Persist active attempts incrementally so reloads
+device, scramble, starting state, duration, integrity, timing basis, and raw moves
+without gyro/orientation samples. Persist active attempts incrementally so reloads
 can retain interrupted recordings. Surface storage failures; never claim a solve
 was saved if its transaction failed. Export/import validates the complete schema
 and preserves data without a backend. Imports merge by identifier.
@@ -103,6 +116,14 @@ ticks to avoid repeatedly scanning session history.
 Incomplete attempts count as DNFs in averages and rank worse than every finite time.
 Trim them among the worst results; any untrimmed DNF makes the whole average DNF.
 Active attempts are excluded.
+After the first finished attempt of each local calendar day, show an independently
+dismissible daily-streak notification beside the existing PB notifications, with
+a cute animated fire and current/best streaks. DNFs count across all sessions;
+deduplicate days, retain the historical best, and reset after a missed day.
+Derive dates from creation time plus raw last-turn elapsed time, excluding fitted
+timing and penalties. Compare calendar days safely across DST. Reuse the final
+penalty-window check; reload/import restores history without replaying notices.
+No derived streak counters are added to backups or storage. Honor reduced motion.
 CSV exports match the 164-column Cubeast sample schema in smartcubeanalyzer.
 Export finished attempts across all sessions, excluding active recordings.
 Use UTC dates, millisecond times, and raw `move[timestamp]` solution notation;
@@ -120,9 +141,16 @@ Derive the same analysis from old recordings without changing the backup schema.
 CSV contains seven CFOP stages and their moves, normalized into a D-cross frame,
 with fitted-device or host times matching the full timeline. Recognition is
 inferred from the gap to a stage's first turn (zero for Cross); execution is the
-remaining stage time, not a measurement of the user's thinking. Unknown physical
-color, case IDs, and unavailable metadata stay blank. JSON backups additionally
-preserve raw device clocks and orientation samples.
+remaining stage time, not a measurement of the user's thinking. Classify completed
+steps from their starting state against SpeedCubeDB's 57 OLL, 21 PLL, and 41
+standard F2L cases, canonicalized across AUF, cross faces, and pair slots.
+Cache the boundary state and recognized ID with incremental milestones; no case
+fields are added to stored solve records. Replay displays the names and CSV's
+existing `step_i_case` fields export numeric OLL/F2L IDs and PLL names.
+Skipped stages export `Solved`; unrecognized or ambiguous F2L cases remain blank.
+Incomplete attempts retain only completed cases, never PLL. Unknown physical
+color and unavailable metadata stay blank. JSON backups additionally
+preserve raw device clocks, but omit unused gyro/orientation samples.
 Display a live trail across the timer/cube card, auto-rescaling to fit the solve
 and filling the full width with proportional durations at completion. Use
 smartcubeanalyzer's dark Cross/OLL/PLL colors and related purple shades for F2L.
@@ -166,4 +194,7 @@ development server, and reject external HTTP requests.
 - https://github.com/poliva/smartcube-web-bluetooth
 - https://github.com/afedotov/gan-web-bluetooth
 - https://js.cubing.net/cubing/
+- https://speedcubedb.com/a/3x3/OLL
+- https://speedcubedb.com/a/3x3/PLL
+- https://speedcubedb.com/a/3x3/F2L
 - https://developer.chrome.com/docs/capabilities/bluetooth

@@ -7,7 +7,6 @@ export interface Turn {
   localTimestamp: number | null; cubeTimestamp: number | null;
 }
 export interface RecordedTurn extends Turn { elapsed: number }
-export interface Orientation { elapsed: number; quaternion: { x: number; y: number; z: number; w: number } }
 export interface Solve {
   version: 1; id: string; session: string; createdAt: string; device: string;
   scramble: string; startFacelets: string; duration: number;
@@ -17,7 +16,7 @@ export interface Solve {
   dnfReason?: 'solve interrupted' | 'solve aborted';
   status: 'active' | 'complete' | 'incomplete';
   reason: string; timingBasis: 'host' | 'device-fit';
-  moves: RecordedTurn[]; orientations: Orientation[];
+  moves: RecordedTurn[];
 }
 
 export const solveTime = (solve: Solve): number => solve.duration + (solve.status === 'complete' ? solve.penalty ?? 0 : 0);
@@ -152,7 +151,7 @@ export class TimerEngine {
         version: 1, id: crypto.randomUUID(), createdAt: new Date().toISOString(), session: this.session,
         device: this.device, scramble: this.scramble, startFacelets: this.facelets,
         inspection: this.inspectionElapsed(turn.hostTime),
-        duration: 0, status: 'active', reason: '', timingBasis: 'host', moves: [], orientations: [],
+        duration: 0, status: 'active', reason: '', timingBasis: 'host', moves: [],
       };
       this.inspectionStarted = null;
       this.phase = 'solving';
@@ -228,10 +227,6 @@ export class TimerEngine {
     const partialTarget = block.find(expected => expected[0] === this.partial[0]?.[0]);
     this.message = this.recovery.length ? 'Wrong turn. Follow correction moves back to the checkpoint.'
       : this.partial.length ? `Turn ${this.partial[0]} once more to complete ${partialTarget}.` : 'Follow the highlighted move.';
-  }
-  gyro(quaternion: Orientation['quaternion'], hostTime: number): void {
-    if (!this.active) return;
-    this.active.orientations.push({ elapsed: Math.max(0, hostTime - this.started), quaternion });
   }
   interrupt(reason: string, dnfReason: NonNullable<Solve['dnfReason']> = 'solve interrupted'): void {
     if (!this.active) return;

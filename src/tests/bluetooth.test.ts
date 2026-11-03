@@ -96,7 +96,9 @@ test('logs connection stages, the requested MAC, verified device, commands and n
   expect(info).toHaveBeenCalledWith(expect.stringMatching(/Cube event$/), move);
   const gyro: SmartCubeEvent = { type: 'GYRO', timestamp: 2, quaternion: { x: 0, y: 0, z: 0, w: 1 } };
   stream.next(gyro);
-  expect(debug).toHaveBeenCalledWith('[Timer Bluetooth] GYRO', gyro);
+  expect(events).not.toHaveBeenCalledWith(gyro);
+  expect(debug).not.toHaveBeenCalled();
+  expect(info).not.toHaveBeenCalledWith(expect.stringMatching(/Cube event$/), gyro);
   const failure = new Error('Notifications lost.');
   stream.error(failure);
   expect(errors).toHaveBeenCalledWith('[Timer Bluetooth] Cube event stream failed', failure);

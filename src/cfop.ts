@@ -1,6 +1,7 @@
 import type { KPattern } from 'cubing/kpuzzle';
 import type { Solve } from './engine';
 import { locations, type Cube } from './puzzle';
+import { recognizeCase } from './cases';
 
 export const CFOP_STEPS = ['Cross', 'F2L Slot 1', 'F2L Slot 2', 'F2L Slot 3', 'F2L Slot 4', 'OLL', 'PLL'];
 const edges = locations.EDGES.map(stickers => stickers.map(index => Math.floor(index / 9)));
@@ -9,9 +10,10 @@ const layers = [...'URFDLB'].map((_, face) => ({
   cross: edges.flatMap((sides, i) => sides.includes(face) ? [i] : []),
   pairs: corners.flatMap((sides, i) => sides.includes(face) ? [[i, edges.findIndex(edge => !edge.includes(face) && edge.every(side => sides.includes(side)))]] : []),
 }));
-const cache = new WeakMap<Solve, { pattern: KPattern; processed: number; cross: number | null; ends: number[] }>();
-export function analyzeCFOP(solve: Solve, cube: Cube): { cross: number | null; ends: number[] } {
-  const state = cache.get(solve) ?? { pattern: cube.parse(solve.startFacelets), processed: 0, cross: null, ends: [] }; cache.set(solve, state);
+const cache = new WeakMap<Solve, { pattern: KPattern; boundary: KPattern | null; processed: number; cross: number | null; ends: number[]; cases: string[] }>();
+export function analyzeCFOP(solve: Solve, cube: Cube): { cross: number | null; ends: number[]; cases: string[] } {
+  const state = cache.get(solve) ?? { pattern: cube.parse(solve.startFacelets), boundary: null, processed: 0, cross: null, ends: [], cases: [] }; cache.set(solve, state);
+  state.boundary ??= state.pattern;
   const check = (end: number) => {
     const solved = (orbit: 'EDGES' | 'CORNERS', i: number) => state.pattern.patternData[orbit].pieces[i] === i && state.pattern.patternData[orbit].orientation[i] === 0;
     const cross = (face: number) => layers[face].cross.every(i => solved('EDGES', i));
@@ -21,11 +23,15 @@ export function analyzeCFOP(solve: Solve, cube: Cube): { cross: number | null; e
     const pairs = layers[state.cross].pairs.filter(([corner, edge]) => solved('CORNERS', corner) && solved('EDGES', edge)).length;
     const top = [3, 4, 5, 0, 1, 2][state.cross], facelets = cube.facelets(state.pattern);
     const done = [true, ...[1, 2, 3, 4].map(count => pairs >= count), pairs === 4 && [...facelets.slice(top * 9, top * 9 + 9)].every(face => face === 'URFDLB'[top]), cube.isSolved(state.pattern)];
-    while (state.ends.length < done.length && done[state.ends.length]) state.ends.push(end);
+    while (state.ends.length < done.length && done[state.ends.length]) {
+      state.cases.push(state.ends.length && end === state.ends.at(-1) ? 'Solved' :
+        recognizeCase(state.ends.length, cube, state.cross, state.boundary!, state.pattern));
+      state.boundary = state.pattern; state.ends.push(end);
+    }
   };
   if (state.processed === 0) check(0);
   while (state.processed < solve.moves.length) { state.pattern = state.pattern.applyMove(solve.moves[state.processed].move); check(++state.processed); }
-  return { cross: state.cross, ends: solve.status === 'incomplete' ? state.ends.slice(0, 6) : state.ends };
+  return { cross: state.cross, ends: solve.status === 'incomplete' ? state.ends.slice(0, 6) : state.ends, cases: solve.status === 'incomplete' ? state.cases.slice(0, 6) : state.cases };
 }
 export function elapsedAt(solve: Solve, end: number): number {
   const move = solve.moves[end - 1], first = solve.moves[0], span = (solve.moves.at(-1)?.cubeTimestamp ?? 0) - (first?.cubeTimestamp ?? 0);

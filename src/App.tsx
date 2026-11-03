@@ -3,7 +3,7 @@ import type { SmartCubeEvent } from 'smartcube-web-bluetooth';
 import { BluetoothCube } from './bluetooth';
 import { TimerEngine, solveTime, type Solve } from './engine';
 import { generateScramble, inverse, loadCube, SOLVED, type Cube } from './puzzle';
-import { averageDetails, backupJSON, cubeastCSV, formatTime, newPersonalBests, numberedSolves, personalBestNotifications, readSolves, saveSolves, sessionStats, turns, validateBackup } from './storage';
+import { averageDetails, backupJSON, cubeastCSV, dailyStreak, formatTime, newPersonalBests, numberedSolves, personalBestNotifications, readSolves, saveSolves, sessionStats, solveEndDate, turns, validateBackup } from './storage';
 import { AverageDetails } from './AverageDetails';
 import { CubeView } from './CubeView';
 import { Replay } from './Replay';
@@ -12,7 +12,7 @@ import { useScreenWakeLock } from './useScreenWakeLock';
 
 const errorText = (error: Error): string => error.message || 'The operation failed.';
 const historyColumns = [
-  { key: 'number', label: 'Solve number' },
+  { key: 'number', label: 'Solve' },
   { key: 'duration', label: 'Time' },
   { key: 'turns', label: 'Turns' },
   { key: 'tps', label: 'TPS' },
@@ -33,6 +33,7 @@ export default function App() {
   const [cube, setCube] = useState<Cube | null>(null);
   const [history, setHistory] = useState<Solve[]>([]);
   const [celebrations, setCelebrations] = useState<{ id: string; name: string; time: number; solve: Solve; average: ReturnType<typeof averageDetails> }[]>([]);
+  const [streaks, setStreaks] = useState<{ id: string; current: number; best: number }[]>([]);
   const [average, setAverage] = useState<ReturnType<typeof averageDetails>>(null);
   const [historySort, setHistorySort] = useState<{ column: HistoryColumn; direction: 'ascending' | 'descending' }>({ column: 'number', direction: 'descending' });
   const [error, setError] = useState('');
@@ -130,6 +131,11 @@ export default function App() {
           const candidate = recordChecks.current.get(copy.id);
           recordChecks.current.delete(copy.id);
           if (!candidate) return;
+          const date = solveEndDate(candidate.solve);
+          if (!dailyStreak(candidate.previous, date).hasToday) {
+            const { current, best } = dailyStreak(historyRef.current, date);
+            setStreaks(items => [...items, { id: copy.id, current, best }]);
+          }
           const records = notificationRecords(newPersonalBests(candidate.previous, candidate.solve));
           if (records.length) {
             const solves = [candidate.solve, ...candidate.previous.filter(item => item.session === candidate.solve.session && item.id !== copy.id)
@@ -184,14 +190,14 @@ export default function App() {
     return () => { mounted.current = false; clearInterval(interval); checks.forEach(check => clearTimeout(check.timeout)); checks.clear(); void adapter.disconnect(); };
   }, []);
 
-  async function prepareScramble(recover = false) {
+  async function prepareScramble(recover = false, existingScramble = '') {
     const timer = engine.current;
     const allowed = ['synchronizing', 'scrambling', 'ready', 'finished', ...(recover ? ['recovery', 'recovering'] : [])];
     if (!timer || preparing.current || !allowed.includes(timer.phase)) return;
     const token = ++generation.current, initial = timer.facelets;
-    preparing.current = true; setBusy(true); setStatus(recover ? 'Finding moves to return the cube to solved...' : 'Generating scramble and setup locally...');
+    preparing.current = true; setBusy(true); setStatus(recover || existingScramble ? 'Finding moves to return the cube to solved...' : 'Generating scramble and setup locally...');
     try {
-      const [scramble, setup] = await Promise.all([recover ? Promise.resolve('') : generateScramble(), initial === SOLVED ? Promise.resolve([]) : timer.cube.solution(initial)]);
+      const [scramble, setup] = await Promise.all([recover || existingScramble ? Promise.resolve(recover ? '' : existingScramble) : generateScramble(), initial === SOLVED ? Promise.resolve([]) : timer.cube.solution(initial)]);
       if (token !== generation.current) return;
       if (timer.facelets !== initial || !allowed.includes(timer.phase)) throw new Error('Cube changed during preparation. Resynchronize and try again.');
       if (recover) timer.prepareRecovery(setup);
@@ -221,11 +227,13 @@ export default function App() {
         timer.session = sessionRef.current.trim() || 'Default';
         timer.turn(turn);
         if (timer.phase === 'finished') void prepareScramble();
+        else if (['scrambling', 'recovering'].includes(timer.phase) && timer.recovery.length >= 10) {
+          void prepareScramble(timer.phase === 'recovering', timer.scramble);
+        }
       } else if (event.type === 'FACELETS') {
         timer.snapshot(event.facelets, event.serial);
         if (timer.phase === 'synchronizing') void prepareScramble(timer.result?.status === 'incomplete');
       } else if (event.type === 'BATTERY') setBattery(event.batteryLevel);
-      else if (event.type === 'GYRO') timer.gyro(event.quaternion, hostTime);
       else if (event.type === 'DISCONNECT') {
         cancelPreparation();
         setBattery(null);
@@ -293,7 +301,6 @@ export default function App() {
   async function importBackup(file?: File) {
     if (!file || !cube) return;
     try {
-      if (file.size > 10_000_000) throw new Error('Backup exceeds the 10 MB import limit.');
       const solves = validateBackup(await file.text(), cube);
       await writes.current;
       await saveSolves(solves);
@@ -330,8 +337,11 @@ export default function App() {
   }, [filtered, historySort]);
   const recovering = timer?.phase === 'recovering';
   const setupCount = timer && !recovering ? timer.instructions.length - timer.scramble.trim().split(/\s+/).length : 0;
-  const displayedMoves = recovering ? timer.instructions : timer?.scramble ? timer.scramble.split(/\s+/) : [];
+  const returning = recovering || (timer?.phase === 'scrambling' && timer.progress < setupCount);
+  const displayedMoves = returning && timer ? timer.instructions.slice(0, recovering ? undefined : setupCount) : timer?.scramble && !preparing.current ? timer.scramble.split(/\s+/) : [];
+  const displayedOffset = returning ? 0 : setupCount;
   const correctionMoves = timer?.phase === 'scrambling' || recovering ? timer.recovery : [];
+  const showCorrections = correctionMoves.length > 0 && !preparing.current;
   const solving = timer?.phase === 'solving';
   const hideTimer = solving && hiddenVisuals.timer, hideCube = solving && hiddenVisuals.cube, hideProgressBar = solving && hiddenVisuals.progressBar;
   const allVisualsHidden = hiddenVisuals.timer && hiddenVisuals.cube && hiddenVisuals.progressBar;
@@ -392,13 +402,14 @@ export default function App() {
     {!['Saved locally', 'Saving locally...'].includes(storage) && <p className="text-secondary small mb-3">{storage}</p>}
     <section className={`panel timer-panel ${timer?.phase === 'ready' ? 'ready' : ''}`}>
       {recovering && <p className="small text-secondary mb-2">Return the cube to solved</p>}
+      {returning && !recovering && <p className="small text-secondary mb-2">First solve the current cube</p>}
       <div className={`scramble mb-3${solving ? ' scramble-solving' : ''}`} aria-label="Scramble">
-        <div className="scramble-content" aria-hidden={solving}>{timer && displayedMoves.length ? <>
-        {displayedMoves.map((move, i) => correctionMoves.length && !timer.completed[i + setupCount] ? null :
-          <span key={i} className={`move ${timer.completed[i + setupCount] ? 'done' : i + setupCount === timer.progress ? currentMoveClass : timer.isPartialMove(i + setupCount) ? 'partial' : ''}`} title={timer.isPartialMove(i + setupCount) ? 'Partially complete' : undefined}>{move}</span>)}
-        {!!correctionMoves.length && <span role="group" aria-label="Correction moves">{correctionMoves.map((move, i) =>
+        <div className="scramble-content" aria-hidden={solving}>{timer && displayedMoves.length ? <span role="group" aria-label={returning ? 'Path to solved' : 'Original scramble'}>{displayedMoves.map((move, i) => correctionMoves.length && !timer.completed[i + displayedOffset] ? null :
+          <span key={i} className={`move ${timer.completed[i + displayedOffset] ? 'done' : !correctionMoves.length && i + displayedOffset === timer.progress ? currentMoveClass : timer.isPartialMove(i + displayedOffset) ? 'partial' : ''}`} title={timer.isPartialMove(i + displayedOffset) ? 'Partially complete' : undefined}>{move}</span>)}</span>
+          : !connected ? <span className="text-secondary">Connect a cube to generate a scramble.</span> : null}
+        {showCorrections && <span role="group" aria-label="Correction moves">{correctionMoves.map((move, i) =>
           <span key={i} className={`move correction ${i === 0 ? 'current' : ''}`}>{move}</span>)}</span>}
-      </> : <span className="text-secondary">Connect a cube to generate a scramble.</span>}</div>
+        </div>
         {solving && <div className="scramble-placeholder text-secondary">
           <span role="status">Scrambles hidden while solving</span>
           <button className="btn btn-sm btn-outline-warning" onClick={() => { timer?.fail('Solve aborted by user.', true, 'solve aborted'); void prepareScramble(true); }}>Abort solve</button>
@@ -409,8 +420,6 @@ export default function App() {
           </svg>
         </button>
       </div>
-      {setupCount > 0 && timer && timer.progress < setupCount && !correctionMoves.length && <p className="mt-2">First solve the current cube: <strong>{timer.instructions.slice(timer.progress, setupCount).map((move, i) =>
-        <span key={i} className={`move ${timer.completed[timer.progress + i] ? 'done' : i === 0 ? currentMoveClass : timer.isPartialMove(timer.progress + i) ? 'partial' : ''}`} title={timer.isPartialMove(timer.progress + i) ? 'Partially complete' : undefined}>{move}</span>)}</strong></p>}
       <div className="row g-3 align-items-center"><div className={hideCube ? 'col-12' : 'col-lg-7'}>
       {hideTimer ? <div className="solving-indicator" role="status" aria-label="Solving">
         <span>Solving</span><span className="solving-dots" aria-hidden="true"><span>...</span></span>
@@ -451,8 +460,9 @@ export default function App() {
         <table className="table table-sm" aria-label="Session statistics"><thead><tr><th scope="col">Metric</th><th scope="col">Current</th><th scope="col">Best</th></tr></thead>
           <tbody>{statistics.map(stat => <tr key={stat.name}><th scope="row">{stat.name}</th>
             {(['current', 'best'] as const).map(kind => <td key={kind}>{stat[kind] === null ? '--' :
-              stat.name === 'Single' ? stat[kind] === 'DNF' ? 'DNF' : formatTime(stat[kind] as number, precision) :
-                <button className="stat-link" aria-label={`View ${kind} ${stat.name}`} onClick={() => setAverage(averageDetails(filtered, Number(stat.name.slice(2)), kind === 'best'))}>{stat[kind] === 'DNF' ? 'DNF' : formatTime(stat[kind] as number, precision)}</button>}
+              <button className="stat-link" aria-label={`View ${kind} ${stat.name}`} onClick={() => stat.name === 'Single'
+                ? setReplay(filtered.find(solve => (solve.status === 'complete' ? solveTime(solve) : 'DNF') === stat[kind]) ?? null)
+                : setAverage(averageDetails(filtered, Number(stat.name.slice(2)), kind === 'best'))}>{stat[kind] === 'DNF' ? 'DNF' : formatTime(stat[kind] as number, precision)}</button>}
             </td>)}
           </tr>)}</tbody>
         </table>
@@ -460,9 +470,9 @@ export default function App() {
     </section>
     <section className="panel mt-3">
       <div className="d-flex justify-content-between flex-wrap gap-2"><h2>Session history</h2><div className="d-flex gap-2">
-        <button className="btn btn-outline-secondary" onClick={() => exportHistory('csv')}>Export Cubeast CSV</button>
-        <button className="btn btn-outline-secondary" onClick={() => exportHistory('json')}>Export JSON</button>
-        <label className={`btn btn-outline-secondary mb-0 ${timer?.phase === 'solving' ? 'disabled' : ''}`}>Import JSON<input type="file" className="visually-hidden" accept=".json,application/json" disabled={timer?.phase === 'solving'} onChange={event => { void importBackup(event.target.files?.[0]); event.target.value = ''; }} /></label>
+        <button className="btn btn-outline-secondary" onClick={() => exportHistory('csv')}>Export CSV</button>
+        <button hidden className="btn btn-outline-secondary" onClick={() => exportHistory('json')}>Export JSON</button>
+        <label hidden className={`btn btn-outline-secondary mb-0 ${timer?.phase === 'solving' ? 'disabled' : ''}`}>Import JSON<input type="file" className="visually-hidden" accept=".json,application/json" disabled={timer?.phase === 'solving'} onChange={event => { void importBackup(event.target.files?.[0]); event.target.value = ''; }} /></label>
       </div></div>
       <div className="table-responsive"><table className="table align-middle" aria-label="Solve history">
         <thead><tr>{historyColumns.map(column => <th key={column.key} scope="col" aria-sort={historySort.column === column.key ? historySort.direction : undefined}>
@@ -480,7 +490,29 @@ export default function App() {
     </section>
     {average && <AverageDetails details={average} history={history} precision={precision} view={setReplay} close={() => setAverage(null)} />}
     {cube && replay && <Replay key={replay.id} cube={cube} solve={replay} precision={precision} close={() => setReplay(null)} />}
-    {!!celebrations.length && <div className="pb-notifications" aria-label="Personal best notifications">{celebrations.map(celebration => <div key={celebration.id} className="pb-celebration" role="status" aria-label="Personal best">
+    {(!!celebrations.length || !!streaks.length) && <div className="pb-notifications" aria-label="Solve notifications">
+      {streaks.map(streak => <div key={streak.id} className="pb-celebration streak-celebration" role="status" aria-label="Daily streak">
+        <div className="pb-open">
+          <svg width="52" height="64" viewBox="0 0 64 80" aria-hidden="true" focusable="false">
+            <g className="streak-flame">
+              <path d="M32 5C39 22 52 25 50 39C55 36 57 30 57 30C64 49 53 72 32 72C10 72 0 52 9 35C9 45 17 46 18 36C19 23 30 19 32 5Z" fill="#ff8647" />
+              <path d="M32 28C35 39 44 39 45 49C48 47 49 44 49 44C53 59 45 69 32 69C18 69 13 58 18 48C18 54 24 54 25 47C26 39 31 35 32 28Z" fill="#ffd05c" />
+              <path d="M32 48C35 54 40 57 39 62C37 70 25 70 24 62C23 57 29 54 32 48Z" fill="#fff0b5" />
+              <g fill="#3c2630"><circle cx="24" cy="51" r="2.5" /><circle cx="40" cy="51" r="2.5" /></g>
+              <g fill="#f28573"><ellipse cx="19" cy="56" rx="3" ry="1.5" /><ellipse cx="45" cy="56" rx="3" ry="1.5" /></g>
+              <path d="M28 57Q32 62 36 57" fill="none" stroke="#3c2630" strokeWidth="2" strokeLinecap="round" />
+            </g>
+            <g className="streak-embers" fill="#ffd05c"><circle cx="12" cy="24" r="2" /><circle cx="51" cy="16" r="2" /><circle cx="43" cy="7" r="1.5" /></g>
+          </svg>
+          <span><strong>Congratulations!</strong>
+            <span className="d-block">Daily Streak: {streak.current}</span>
+            <span className="d-block">Best Streak: {streak.best}</span>
+          </span>
+        </div>
+        <button className="btn btn-sm btn-outline-light pb-dismiss" aria-label="Dismiss daily streak"
+          onClick={() => setStreaks(current => current.filter(item => item.id !== streak.id))}>Dismiss</button>
+      </div>)}
+      {celebrations.map(celebration => <div key={celebration.id} className="pb-celebration" role="status" aria-label="Personal best">
       <button className="pb-open" aria-label={`View PB ${celebration.name}`} onClick={() => {
         if (celebration.average) setAverage(celebration.average);
         else setReplay(celebration.solve);

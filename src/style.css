@@ -38,7 +38,13 @@ body:has(.replay-dialog[open], .average-dialog[open]) { overflow: hidden; }
 .pb-sparkles { animation: pb-sparkle 1.4s ease-in-out infinite; }
 @keyframes pb-disco { 50% { filter: drop-shadow(0 0 6px #b695ef); } to { transform: rotate(360deg); } }
 @keyframes pb-sparkle { 50% { opacity: 0.25; transform: translateY(-2px); } }
-@media (prefers-reduced-motion: reduce) { .pb-disco-ball, .pb-sparkles { animation: none; } }
+.streak-celebration { border-color: #ffb35c; box-shadow: 0 0 24px #ff864740; }
+.streak-celebration strong { color: #ffe09c; }
+.streak-flame { transform-origin: 32px 72px; animation: streak-flicker 0.9s ease-in-out infinite; }
+.streak-embers { animation: streak-ember 1.3s ease-out infinite; }
+@keyframes streak-flicker { 25% { transform: rotate(-2deg) scale(0.97, 1.03); } 75% { transform: rotate(2deg) scale(1.03, 0.97); } }
+@keyframes streak-ember { to { opacity: 0; transform: translateY(-7px); } }
+@media (prefers-reduced-motion: reduce) { .pb-disco-ball, .pb-sparkles, .streak-flame, .streak-embers { animation: none; } }
 .solving-indicator { display: flex; align-items: center; justify-content: center; min-height: 180px; font-size: clamp(2rem, 5vw, 3rem); font-weight: 600; }
 .solving-dots { width: 3ch; font-family: ui-monospace, monospace; text-align: left; }
 .solving-dots > span { display: block; width: 0; overflow: hidden; white-space: nowrap; animation: solving-dots 1.6s steps(4, end) infinite; }

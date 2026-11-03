@@ -1,7 +1,8 @@
 import 'fake-indexeddb/auto';
+import { IDBFactory } from 'fake-indexeddb';
 import { TimerEngine, type Solve } from '../engine';
-import { Cube, loadCube, SOLVED } from '../puzzle';
-import { average, averageDetails, backupJSON, cubeastCSV, newPersonalBests, personalBestNotifications, readSolves, saveSolves, sessionStats, turns, validateBackup } from '../storage';
+import { Cube, inverse, loadCube, SOLVED } from '../puzzle';
+import { average, averageDetails, backupJSON, cubeastCSV, dailyStreak, newPersonalBests, personalBestNotifications, readSolves, saveSolves, sessionStats, turns, validateBackup } from '../storage';
 
 let cube: Cube;
 beforeAll(async () => { cube = await loadCube(); });
@@ -12,6 +13,77 @@ function sample(): Solve {
   ['R', 'U2', 'U2', "R'"].forEach((move, i) => timer.turn({ move, hostTime: i * 100, localTimestamp: i * 100, cubeTimestamp: null }));
   return timer.result!;
 }
+
+test('daily streaks combine sessions and DNFs, deduplicate days, and retain the historical best after gaps', () => {
+  const seed = sample(), date = new Date(2026, 10, 2, 12);
+  const solves = Array.from({ length: 7 }, (_, i): Solve => ({
+    ...seed, id: `streak-${i}`, createdAt: new Date(2026, 9, 1 + i, 12).toISOString(),
+    session: i % 2 ? 'Other' : 'Default', status: i % 2 ? 'incomplete' : 'complete',
+  }));
+  expect(dailyStreak([], date)).toEqual({ current: 0, best: 0, hasToday: false });
+  expect(dailyStreak(solves, date)).toEqual({ current: 0, best: 7, hasToday: false });
+  solves.push({ ...seed, id: 'today', createdAt: date.toISOString() });
+  solves.push({ ...solves.at(-1)!, id: 'duplicate-day', status: 'incomplete' });
+  solves.push({ ...seed, id: 'active', createdAt: new Date(2026, 10, 1, 12).toISOString(), status: 'active' });
+  solves.push({ ...seed, id: 'future', createdAt: new Date(2026, 10, 3, 12).toISOString() });
+  expect(dailyStreak(solves.reverse(), date)).toEqual({ current: 1, best: 7, hasToday: true });
+  expect(dailyStreak(validateBackup(backupJSON(solves), cube), date).best).toBe(7);
+});
+
+test.each([
+  [2026, 2, 7], [2026, 9, 31], [2026, 11, 31], [2028, 1, 28],
+])('consecutive local days survive DST, month and year boundaries starting %s-%s-%s', (year, month, day) => {
+  const seed = sample(), solves = Array.from({ length: 3 }, (_, i) => ({
+    ...seed, id: `day-${i}`, createdAt: new Date(year, month, day + i, 12).toISOString(),
+  }));
+  expect(dailyStreak(solves, new Date(year, month, day + 2, 18))).toEqual({ current: 3, best: 3, hasToday: true });
+  expect(dailyStreak(solves, new Date(year, month, day + 3, 18))).toEqual({ current: 3, best: 3, hasToday: false });
+  expect(dailyStreak(solves, new Date(year, month, day + 4, 18))).toEqual({ current: 0, best: 3, hasToday: false });
+});
+
+test('daily streaks use the local last-turn date, not fitted duration, penalties or UTC dates', () => {
+  const seed = sample(), start = new Date(2026, 10, 1, 23, 59, 59, 900);
+  const solve = { ...seed, createdAt: start.toISOString(), duration: 50, penalty: 2000 as const, timingBasis: 'device-fit' as const };
+  expect(dailyStreak([solve], new Date(2026, 10, 1, 23, 59, 59, 950))).toEqual({ current: 0, best: 0, hasToday: false });
+  expect(dailyStreak([solve], new Date(2026, 10, 2, 0, 0, 1))).toEqual({ current: 1, best: 1, hasToday: true });
+  const evening = { ...seed, createdAt: new Date(2026, 10, 2, 23, 30).toISOString() };
+  expect(dailyStreak([evening], new Date(2026, 10, 2, 23, 45))).toEqual({ current: 1, best: 1, hasToday: true });
+});
+
+test('migrates existing local history to remove gyro samples without changing solves', async () => {
+  const previous = indexedDB, solve = sample();
+  globalThis.indexedDB = new IDBFactory();
+  try {
+    const legacy = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open('smart-cube-timer', 1);
+      request.onupgradeneeded = () => request.result.createObjectStore('solves', { keyPath: 'id' });
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const tx = legacy.transaction('solves', 'readwrite');
+        tx.objectStore('solves').put({ ...solve, orientations: [{ elapsed: 10, quaternion: { x: 0, y: 0, z: 0, w: 1 } }] });
+        tx.oncomplete = () => resolve();
+        tx.onabort = () => reject(tx.error);
+      });
+    } finally { legacy.close(); }
+    expect(await readSolves()).toEqual([solve]);
+    const migrated = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open('smart-cube-timer');
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    try {
+      const stored = await new Promise<Solve>((resolve, reject) => {
+        const request = migrated.transaction('solves').objectStore('solves').get(solve.id);
+        request.onsuccess = () => resolve(request.result as Solve);
+        request.onerror = () => reject(request.error);
+      });
+      expect(stored).toEqual(solve);
+    } finally { migrated.close(); }
+  } finally { globalThis.indexedDB = previous; }
+});
 
 test('persists complete records and merges by id', async () => {
   const solve = sample();
@@ -27,6 +99,56 @@ test('JSON backup preserves every raw timing and turn', () => {
   const solve = sample();
   expect(validateBackup(backupJSON([solve]), cube)).toEqual([solve]);
   expect(turns(solve)).toBe(3);
+});
+
+test('compact backups preserve raw device timing, serials and optional metadata losslessly', () => {
+  const solve: Solve = {
+    ...sample(), session: 'Session "one"\n\u65e5\u672c\u8a9e', device: 'Device', inspection: 1234.56789,
+    timingBasis: 'device-fit', duration: 123.456789, penalty: 2000, penaltyReason: 'over-turn',
+  };
+  solve.moves = [...solve.moves, ...Array.from({ length: 500 }, (_, i) => ({ ...solve.moves[0], move: i % 2 ? "R'" : 'R' }))]
+    .map((turn, i) => ({ ...turn, elapsed: i * 100.123456, hostTime: i * 100.123456, localTimestamp: i * 99.765432, cubeTimestamp: i * 101.234567, serial: i }));
+  const compact = backupJSON([solve]);
+  const legacy = JSON.stringify({ format: 'timer-v1', solves: [solve] }, null, 2);
+  expect(validateBackup(compact, cube)).toStrictEqual([solve]);
+  expect(validateBackup(legacy, cube)).toStrictEqual([solve]);
+  expect(compact.length).toBeLessThan(legacy.length / 2);
+});
+
+test.each(['timer-v1', 'timer-v2'])('imports %s backups while discarding obsolete gyro data', format => {
+  const solve = sample();
+  const backup = format === 'timer-v1' ? { format, solves: [solve] }
+    : JSON.parse(backupJSON([solve])) as { format: string; solves: { id: string }[] };
+  const restored = validateBackup(JSON.stringify({
+    ...backup, solves: backup.solves.map(item => ({ ...item, orientations: [{ elapsed: 10, quaternion: { x: 0, y: 0, z: 0, w: 1 } }] })),
+  }), cube);
+  expect(restored).toStrictEqual([solve]);
+  expect(backupJSON(restored)).not.toContain('orientations');
+});
+
+test('compact backups omit unrelated runtime properties', () => {
+  const seed = sample();
+  const solve = { ...seed, debug: 'unused', moves: seed.moves.map(move => ({ ...move, debug: 'unused' })) };
+  const json = backupJSON([solve]);
+  expect(json).not.toContain('unused');
+  expect(validateBackup(json, cube)).toEqual([seed]);
+});
+
+test.each(['timer-v1', 'timer-v2'])('imports %s JSON larger than 10 MB without a size cap', format => {
+  const solve = sample();
+  const json = format === 'timer-v1' ? JSON.stringify({ format, solves: [solve] }) : backupJSON([solve]);
+  expect(validateBackup(' '.repeat(10_000_001) + json, cube)).toEqual([solve]);
+});
+
+test.each([
+  { moves: [null] },
+  { moves: [['R', 0, 0, null]] },
+  { moves: [['R', 0, 0, null, null, null]] },
+  { moves: [['R', 0, 0, null, null, 1, 'extra']] },
+  { moves: [['R', 'invalid', 0, null, null]] },
+])('rejects malformed compact samples %j', fields => {
+  const backup = JSON.parse(backupJSON([sample()])) as { format: string; solves: { id: string }[] };
+  expect(() => validateBackup(JSON.stringify({ ...backup, solves: [{ ...backup.solves[0], ...fields }] }), cube)).toThrow();
 });
 
 test('penalties round-trip through local storage and backups without changing raw timing', async () => {
@@ -337,7 +459,8 @@ test('Cubeast CSV matches the sample schema and records milliseconds, UTC dates,
     step_6_name: 'PLL', step_6_moves: "U'", step_6_recorded_moves: "U'[1235]",
     step_6_time: '1235', step_6_cumulative_time: '1235', steps_skipped: '5',
   });
-  expect(columns.filter(column => /^step_[78]_/.test(column) || column.endsWith('_case')).every(column => row[column] === '')).toBe(true);
+  expect(columns.filter(column => /^step_[78]_/.test(column)).every(column => row[column] === '')).toBe(true);
+  expect(row).toMatchObject({ step_0_case: '', step_1_case: 'Solved', step_5_case: 'Solved', step_6_case: 'Solved' });
   expect(row.inspection_time).toBe('100');
 });
 
@@ -349,6 +472,22 @@ test('Cubeast CSV escapes commas, quotes and newlines without changing stored da
   expect(csv).toContain('"Cube, ""test"""');
   expect(csv).toContain('"Line 1\nLine 2"');
   expect(solve).toEqual(before);
+});
+
+test('case IDs export in analyzer-compatible columns and survive compact backup restoration', () => {
+  const solution = "R' F R F' R U R2 U' R' F R U R U' F' R U R' U' R' F R2 U' R' U' R U R' F'";
+  const scramble = solution.split(' ').reverse().map(inverse).join(' ');
+  const moves = solution.split(' ').map((move, i) => ({ move, elapsed: i * 100, hostTime: i * 100, localTimestamp: i * 100, cubeTimestamp: null }));
+  const solve = { ...sample(), scramble, startFacelets: cube.facelets(cube.solved().applyAlg(scramble)), moves, duration: moves.at(-1)!.elapsed };
+  const csv = cubeastCSV([solve], cube), [header, line] = csv.split('\r\n');
+  const row = Object.fromEntries(header.split(',').map((column, i) => [column, line.split(',')[i]]));
+  expect(row).toMatchObject({ step_0_case: '', step_1_case: 'Solved', step_4_case: '1', step_5_case: '34', step_6_case: 'T', step_7_case: '', step_8_case: '' });
+  const backup = backupJSON([solve]);
+  expect(backup).not.toContain('"cases"');
+  expect(cubeastCSV(validateBackup(backup, cube), cube)).toBe(csv);
+  const dnf = cubeastCSV([{ ...solve, status: 'incomplete' }], cube).split('\r\n')[1].split(',');
+  expect(dnf[header.split(',').indexOf('step_5_case')]).toBe('34');
+  expect(dnf[header.split(',').indexOf('step_6_case')]).toBe('');
 });
 
 test('Cubeast CSV excludes active attempts, includes incomplete attempts as DNFs, and preserves all sessions', () => {
