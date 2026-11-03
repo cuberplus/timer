@@ -799,6 +799,7 @@ test('case names stay beside replay step headings and export after backup restor
   await page.locator('input[type=file]').setInputFiles({
     name: 'recognized-cases.json', mimeType: 'application/json', buffer: Buffer.from(backupJSON([solve])),
   });
+  await expect(page.getByRole('table', { name: 'Solve history' }).getByRole('button', { name: 'View', exact: true })).toHaveCount(1);
   await page.reload();
   await page.getByRole('table', { name: 'Solve history' }).getByRole('button', { name: 'View', exact: true }).click();
   const replay = page.getByRole('dialog', { name: 'Solve replay', exact: true });
@@ -823,7 +824,59 @@ test('case names stay beside replay step headings and export after backup restor
   for await (const chunk of (await (await downloadPromise).createReadStream())!) chunks.push(Buffer.from(chunk));
   const [header, line] = Buffer.concat(chunks).toString('utf8').split('\r\n');
   const row = Object.fromEntries(header.split(',').map((column, i) => [column, line.split(',')[i]]));
-  expect(row).toMatchObject({ step_4_case: '1', step_5_case: '34', step_6_case: 'T' });
+  expect(row).toMatchObject({ solution_rotation: 'UF', step_4_case: '1', step_5_case: '34', step_6_case: 'T' });
+});
+
+test('all six cross colors start underneath in restored replays and export their solve orientation', async ({ page }) => {
+  const cube = await loadCube();
+  const base = "R U R' U' R' F R2 U' R' U' R U R' F' R U R' U R U2 R' R U R' F U F' L U L' B U B' D";
+  const frames = [['x2', 'DB'], ['z', 'RU'], ["z'", 'LU'], ['', 'UF'], ['x', 'BU'], ["x'", 'FU']];
+  const solves = frames.map(([rotation], i) => {
+    const centers = cube.solved().applyAlg(rotation).patternData.CENTERS.pieces;
+    const remap = (alg: string) => alg.split(' ').map(move => 'ULFRBD'[centers.indexOf('ULFRBD'.indexOf(move[0]))] + move.slice(1));
+    const scramble = remap(base), solution = remap(base.split(' ').reverse().map(inverse).join(' '));
+    const timer = new TimerEngine(cube, () => {}, () => {});
+    timer.connect('Test cube'); timer.synchronize(SOLVED); timer.prepare(scramble.join(' '));
+    [...scramble, ...solution].forEach((move, j) => timer.turn({ move, hostTime: j * 100, localTimestamp: j * 100, cubeTimestamp: null }));
+    return { ...timer.result!, id: `cross-orientation-${i}`, createdAt: new Date(Date.UTC(2026, 10, 1, 12, i)).toISOString() };
+  });
+  await page.goto('');
+  await expect(page.getByText('Try simulated cube', { exact: true })).toBeEnabled();
+  await page.locator('input[type=file]').setInputFiles({
+    name: 'six-cross-colors.json', mimeType: 'application/json', buffer: Buffer.from(backupJSON(solves)),
+  });
+  await expect(page.getByRole('table', { name: 'Solve history' }).getByRole('button', { name: 'View', exact: true })).toHaveCount(6);
+  await page.reload();
+  const views = page.getByRole('table', { name: 'Solve history' }).getByRole('button', { name: 'View', exact: true });
+  await expect(views).toHaveCount(6);
+  for (let i = 0; i < solves.length; i++) {
+    await views.nth(i).click();
+    const replay = page.getByRole('dialog', { name: 'Solve replay', exact: true });
+    const id = await replay.getByLabel('Solve ID', { exact: true }).textContent();
+    const solve = solves.find(solve => id!.includes(solve.id))!;
+    const frame = frames[solves.indexOf(solve)][0], centers = cube.solved().applyAlg(frame).patternData.CENTERS.pieces;
+    const cross = 'URFDLB'.indexOf('ULFRBD'[centers.indexOf(5)]);
+    const rotation = ['x2', 'z', "x'", '', "z'", 'x'][cross];
+    const player = replay.locator('twisty-player');
+    const pattern = () => player.evaluate(async element => (await (element as TwistyPlayer).experimentalModel.currentPattern.get()).patternData);
+    await expect.poll(pattern).toEqual(cube.parse(solve.startFacelets).applyAlg(rotation).patternData);
+    expect((await pattern()).CENTERS.pieces[5]).toBe('ULFRBD'.indexOf('URFDLB'[cross]));
+    await expectAnimatedTurn(replay.getByRole('button', { name: 'Next move', exact: true }), '.replay-dialog twisty-player');
+    await expect.poll(pattern).toEqual(cube.parse(solve.startFacelets).applyMove(solve.moves[0].move).applyAlg(rotation).patternData);
+    await replay.locator('.move-timeline button').last().click();
+    await expect.poll(pattern).toEqual(cube.solved().applyAlg(rotation).patternData);
+    await replay.getByRole('button', { name: 'Close replay', exact: true }).click();
+  }
+  const downloading = page.waitForEvent('download');
+  await page.getByRole('button', { name: 'Export CSV', exact: true }).click();
+  const chunks: Buffer[] = [];
+  for await (const chunk of (await (await downloading).createReadStream())!) chunks.push(Buffer.from(chunk));
+  const [header, ...lines] = Buffer.concat(chunks).toString('utf8').trim().split('\r\n');
+  const columns = header.split(',');
+  for (const line of lines) {
+    const cells = line.split(','), id = cells[columns.indexOf('id')];
+    expect(cells[columns.indexOf('solution_rotation')]).toBe(frames[solves.findIndex(solve => solve.id === id)][1]);
+  }
 });
 
 test('hide distracting visuals persists and animates zero to three dots without moving Solving', async ({ page }) => {

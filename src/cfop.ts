@@ -1,6 +1,6 @@
 import type { KPattern } from 'cubing/kpuzzle';
 import type { Solve } from './engine';
-import { locations, type Cube } from './puzzle';
+import { crossRotation, locations, type Cube } from './puzzle';
 import { recognizeCase } from './cases';
 
 export const CFOP_STEPS = ['Cross', 'F2L Slot 1', 'F2L Slot 2', 'F2L Slot 3', 'F2L Slot 4', 'OLL', 'PLL'];
@@ -44,6 +44,6 @@ export function cfopTiming(solve: Solve, ends: number[], step: number, elapsed =
   return { start, end, time, recognition, execution: time - recognition };
 }
 export function cfopFrame(cube: Cube, cross: number): (move: string) => string {
-  const centers = cube.solved().applyAlg(['x2', 'z', "x'", '', "z'", 'x'][cross]).patternData.CENTERS.pieces;
+  const centers = cube.solved().applyAlg(crossRotation(cross)).patternData.CENTERS.pieces;
   return move => 'ULFRBD'[centers.indexOf('ULFRBD'.indexOf(move[0]))] + move.slice(1);
 }

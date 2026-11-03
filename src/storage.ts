@@ -217,6 +217,7 @@ const csvCell = (value: string | number | boolean): string => /[",\r\n]/.test(St
 export function cubeastCSV(solves: Solve[], cube: Cube): string {
   const rows = solves.filter(solve => solve.status !== 'active').map(solve => {
     const duration = solve.status === 'complete' ? Math.round(solve.duration) : '';
+    const analysis = analyzeCFOP(solve, cube), frame = cfopFrame(cube, analysis.cross ?? 3);
     const values: Record<string, string | number | boolean> = {
       id: solve.id, date: new Date(solve.createdAt).toISOString().slice(0, 19).replace('T', ' ') + ' UTC',
       dnf: solve.status !== 'complete', time: solve.status === 'complete' ? Math.round(solveTime(solve)) : '', timer_time: duration, solving_time: duration,
@@ -224,10 +225,9 @@ export function cubeastCSV(solves: Solve[], cube: Cube): string {
       inspection_time: solve.inspection === undefined ? '' : Math.round(solve.inspection),
       device_name: solve.device, session_name: solve.session, scramble: solve.scramble, scramble_provider: 'random_state',
       solution: solve.moves.map((move, i) => `${move.move}[${Math.round(elapsedAt(solve, i + 1))}]`).join(' '),
-      timer: 'cube', solving_method: 'CFOP', description: solve.reason, slice_turns: solve.moves.length, face_turns: solve.moves.length,
+      timer: 'cube', solving_method: 'CFOP', solution_rotation: analysis.cross === null ? '' : ['DB', 'LU', 'BU', 'UF', 'RU', 'FU'][analysis.cross], description: solve.reason, slice_turns: solve.moves.length, face_turns: solve.moves.length,
       quarter_turns: turns(solve), turns_per_second: solve.duration > 0 ? (solve.moves.length * 1000 / solve.duration).toFixed(2) : '',
     };
-    const analysis = analyzeCFOP(solve, cube), frame = analysis.cross === null ? (move: string) => move : cfopFrame(cube, analysis.cross);
     CFOP_STEPS.forEach((name, i) => {
       const start = analysis.ends[i - 1] ?? 0, end = analysis.ends[i];
       values[`step_${i}_name`] = name; if (end === undefined) return;

@@ -11,10 +11,10 @@ export function Replay({ cube, solve, close, precision = 2 }: { cube: Cube; solv
   const [playing, setPlaying] = useState(false);
   const [speed, setSpeed] = useState(1);
   const moves = useMemo(() => solve.moves.map(turn => turn.move), [solve]);
+  const { cross, ends, cases } = useMemo(() => analyzeCFOP(solve, cube), [solve, cube]);
   useEffect(() => { dialog.current?.showModal(); }, []);
   const dismiss = () => { dialog.current?.close(); close(); };
   const steps = useMemo(() => {
-    const { ends, cases } = analyzeCFOP(solve, cube);
     return CFOP_STEPS.map((name, step) => {
       const start = step ? ends[step - 1] ?? solve.moves.length : 0;
       const end = step === 6 ? solve.moves.length : ends[step] ?? solve.moves.length;
@@ -32,7 +32,7 @@ export function Replay({ cube, solve, close, precision = 2 }: { cube: Cube; solv
         groups: groups.map(group => ({ ...group, move: group.notation[0] + ['4', '', '2', "'"][(group.amount % 4 + 4) % 4] })),
       };
     });
-  }, [cube, solve]);
+  }, [ends, cases, solve]);
   useEffect(() => {
     if (!playing || position >= solve.moves.length) { setPlaying(false); return; }
     const before = position ? solve.moves[position - 1].elapsed : 0, delay = Math.max(20, (solve.moves[position].elapsed - before) / speed);
@@ -45,7 +45,7 @@ export function Replay({ cube, solve, close, precision = 2 }: { cube: Cube; solv
     <p>{solve.status} - {formatTime(solve.duration, precision)}s - {turns(solve)} quarter turns - {solve.timingBasis} timing</p>
     <p className="small text-secondary" aria-label="Inspection time">Inspection: {solve.inspection === undefined ? 'Not recorded' : `${formatTime(solve.inspection, precision)}s`}</p>
     <p className="scramble">{movesOf(solve.scramble).join(' ')}</p>
-    <CubeView cube={cube} facelets={facelets} moves={moves} position={position} speed={speed} />
+    <CubeView cube={cube} facelets={facelets} moves={moves} position={position} speed={speed} cross={cross} />
     <div className="d-flex gap-2 align-items-center flex-wrap">
       <button className="btn btn-primary" disabled={!solve.moves.length} onClick={() => { if (position >= solve.moves.length) setPosition(0); setPlaying(!playing); }}>{playing ? 'Pause' : 'Play'}</button>
       <button className="btn btn-outline-secondary" disabled={position === 0} onClick={() => { setPlaying(false); setPosition(p => p - 1); }}>Previous move</button>

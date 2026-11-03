@@ -8,7 +8,7 @@ import { inverse, loadCube } from '../puzzle';
 import { analyzeCFOP, CFOP_STEPS } from '../cfop';
 
 await jest.unstable_mockModule('../CubeView', () => ({
-  CubeView: ({ facelets }: { facelets: string }) => createElement('div', { 'data-facelets': facelets, 'aria-label': 'Replay cube' }),
+  CubeView: ({ facelets, cross }: { facelets: string; cross: number | null }) => createElement('div', { 'data-facelets': facelets, 'data-cross': cross, 'aria-label': 'Replay cube' }),
 }));
 const { Replay } = await import('../Replay');
 const cube = await loadCube();
@@ -112,6 +112,21 @@ test('solution is partitioned into the same seven CFOP milestones as the timelin
   expect(position()).toBe(String(solve.moves.length));
   expect(facelets()).toBe(cube.facelets(cube.solved()));
   expect(solve).toEqual(original);
+});
+
+test.each(['', 'x2', 'z', "z'", 'x', "x'"])('replays restored solves with their detected cross underneath in frame "%s"', async rotation => {
+  const centers = cube.solved().applyAlg(rotation).patternData.CENTERS.pieces;
+  const remap = (alg: string) => alg.split(' ').map(move => 'ULFRBD'[centers.indexOf('ULFRBD'.indexOf(move[0]))] + move.slice(1)).join(' ');
+  const solve = recording(remap(scramble), remap(scramble.split(' ').reverse().map(inverse).join(' ')));
+  const before = structuredClone(solve), expected = 'URFDLB'.indexOf(remap('D'));
+  await draw(solve);
+  expect(container.querySelector('[aria-label="Replay cube"]')!.getAttribute('data-cross')).toBe(String(expected));
+  await click('Next move');
+  expect(container.querySelector('[aria-label="Replay cube"]')!.getAttribute('data-cross')).toBe(String(expected));
+  expect(solve).toEqual(before);
+  await click('Previous move');
+  await draw(recording(remap(scramble), '', 'incomplete'));
+  expect(container.querySelector('[aria-label="Replay cube"]')!.hasAttribute('data-cross')).toBe(false);
 });
 
 test('repeated turns compact within a step without combining across a milestone', async () => {

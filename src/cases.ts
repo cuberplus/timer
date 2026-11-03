@@ -1,5 +1,5 @@
 import type { KPattern } from 'cubing/kpuzzle';
-import type { Cube } from './puzzle';
+import { crossRotation, type Cube } from './puzzle';
 
 // Canonical states from SpeedCubeDB's 3x3 OLL, PLL, and F2L catalogs; no algorithm matching.
 const numbered = (keys: string) => new Map(keys.split(' ').map((key, i) => [key, String(i + 1)]));
@@ -36,10 +36,9 @@ const pairSolved = (pattern: KPattern) => ['CORNERS', 'EDGES'].every((orbit, i) 
 });
 export function recognizeCase(step: number, cube: Cube, cross: number, before: KPattern, after: KPattern): string {
   if (!step) return '';
-  const rotation = ['x2', 'z', "x'", '', "z'", 'x'][cross];
-  before = normalized(cube, before, rotation);
+  before = normalized(cube, before, crossRotation(cross));
   if (step < 5) {
-    after = normalized(cube, after, rotation);
+    after = normalized(cube, after, crossRotation(cross));
     const targets = spins.map(spin => [normalized(cube, before, spin), normalized(cube, after, spin)])
       .filter(([start, end]) => !pairSolved(start) && pairSolved(end));
     if (targets.length !== 1) return '';

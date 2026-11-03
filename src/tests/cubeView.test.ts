@@ -38,9 +38,9 @@ beforeEach(() => {
 });
 afterEach(async () => { await act(async () => root.unmount()); container.remove(); jest.restoreAllMocks(); });
 
-async function draw(moves: string[], position = moves.length, animateSeeks = false, speed = 1, start = SOLVED) {
+async function draw(moves: string[], position = moves.length, animateSeeks = false, speed = 1, start = SOLVED, cross: number | null = null) {
   const facelets = cube.facelets(cube.parse(start).applyAlg(moves.slice(0, position).join(' ')));
-  await act(async () => root.render(createElement(CubeView, { cube, facelets, moves, position, animateSeeks, speed })));
+  await act(async () => root.render(createElement(CubeView, { cube, facelets, moves, position, animateSeeks, speed, cross })));
 }
 function frame(milliseconds = 25) {
   clock += milliseconds;
@@ -90,6 +90,28 @@ test('replay animates single forward and backward moves, respects speed, and sna
   await draw(moves, 3);
   expect(timestamps.at(-1)).toBe(3000);
   expect(frames.size).toBe(0);
+});
+
+test.each(['x2', 'z', "x'", '', "z'", 'x'])('cross face %#: preserves sticker colors and every replay position with rotation "%s"', async rotation => {
+  const moves = ['R', 'U', 'F2', "L'", 'B', 'D2'];
+  const start = cube.facelets(cube.solved().applyAlg([...moves].reverse().map(move => move.includes('2') ? move : move.endsWith("'") ? move[0] : `${move}'`).join(' ')));
+  const cross = ['x2', 'z', "x'", '', "z'", 'x'].indexOf(rotation);
+  await draw(moves, 0, false, 1, start, cross);
+  const initial = setup.mock.calls.at(-1)![0]!.toKPattern();
+  expect(initial.patternData.CENTERS.pieces[5]).toBe('ULFRBD'.indexOf('URFDLB'[cross]));
+  const displayed = timeline.mock.calls.at(-1)![0].map(leaf => leaf.animLeaf.toString());
+  for (let i = 0; i <= moves.length; i++) {
+    const actual = initial.applyAlg(displayed.slice(0, i).join(' '));
+    const expected = cube.parse(start).applyAlg(moves.slice(0, i).join(' ')).applyAlg(rotation);
+    expect(actual.patternData).toEqual(expected.patternData);
+  }
+  await draw(moves, 1, false, 2, start, cross);
+  frame(); expect(timestamps.at(-1)).toBe(500);
+  await draw(moves, moves.length, false, 1, start, cross);
+  expect(timestamps.at(-1)).toBe(moves.length * 1000);
+  await draw(moves, moves.length, false, 1, start, null);
+  expect(setup.mock.calls.at(-1)![0]!.toKPattern().patternData).toEqual(cube.parse(start).patternData);
+  expect(timeline.mock.calls.at(-1)![0].map(leaf => leaf.animLeaf.toString())).toEqual(moves);
 });
 
 test('resynchronization cancels stale animation, and a delayed frame cannot skip a whole turn', async () => {

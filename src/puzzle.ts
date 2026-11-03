@@ -4,6 +4,7 @@ import { randomScrambleForEvent } from 'cubing/scramble';
 import { experimentalSolve3x3x3IgnoringCenters } from 'cubing/search';
 
 export const SOLVED = 'UUUUUUUUURRRRRRRRRFFFFFFFFFDDDDDDDDDLLLLLLLLLBBBBBBBBB';
+export const crossRotation = (cross: number | null): string => ['x2', 'z', "x'", '', "z'", 'x'][cross ?? 3];
 export const isMove = (move: string): boolean => /^[URFDLB](2|'|2')?$/.test(move);
 export const movesOf = (alg: string): string[] => alg.trim() ? alg.trim().split(/\s+/) : [];
 export const inverse = (move: string): string => move.includes('2') ? move[0] + '2' : move.endsWith("'") ? move[0] : move + "'";

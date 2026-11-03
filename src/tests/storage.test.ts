@@ -490,6 +490,31 @@ test('case IDs export in analyzer-compatible columns and survive compact backup 
   expect(dnf[header.split(',').indexOf('step_6_case')]).toBe('');
 });
 
+test.each([
+  ['x2', 'DB', 'white'], ['z', 'RU', 'orange'], ["z'", 'LU', 'red'],
+  ['', 'UF', 'yellow'], ['x', 'BU', 'green'], ["x'", 'FU', 'blue'],
+])('exports the %s frame as analyzer %s (%s cross), including restored and DNF attempts', (tilt, rotation) => {
+  const base = "R U R' U' R' F R2 U' R' U' R U R' F' R U R' U R U2 R' R U R' F U F' L U L' B U B' D";
+  for (const spin of ['', 'y', 'y2', "y'"]) {
+    const centers = cube.solved().applyAlg(`${spin} ${tilt}`).patternData.CENTERS.pieces;
+    const remap = (alg: string) => alg.split(' ').map(move => 'ULFRBD'[centers.indexOf('ULFRBD'.indexOf(move[0]))] + move.slice(1)).join(' ');
+    const scramble = remap(base), solution = remap(base.split(' ').reverse().map(inverse).join(' '));
+    const moves = solution.split(' ').map((move, i) => ({ move, elapsed: i * 100, hostTime: i * 100, localTimestamp: i * 100, cubeTimestamp: null }));
+    const solve = { ...sample(), scramble, startFacelets: cube.facelets(cube.solved().applyAlg(scramble)), moves, duration: moves.at(-1)!.elapsed };
+    const before = structuredClone(solve), csv = cubeastCSV([solve], cube), [header, line] = csv.split('\r\n');
+    const row = Object.fromEntries(header.split(',').map((column, i) => [column, line.split(',')[i]]));
+    expect(row.solution_rotation).toBe(rotation);
+    expect(row.step_0_moves).toBe("D'");
+    expect(row.solution).toBe(moves.map(move => `${move.move}[${move.elapsed}]`).join(' '));
+    expect(cubeastCSV(validateBackup(backupJSON([solve]), cube), cube)).toBe(csv);
+    expect(solve).toEqual(before);
+    const dnf = cubeastCSV([{ ...solve, status: 'incomplete' }], cube).split('\r\n')[1].split(',');
+    expect(dnf[header.split(',').indexOf('solution_rotation')]).toBe(rotation);
+    const unreached = cubeastCSV([{ ...solve, status: 'incomplete', moves: [] }], cube).split('\r\n')[1].split(',');
+    expect(unreached[header.split(',').indexOf('solution_rotation')]).toBe('');
+  }
+});
+
 test('Cubeast CSV excludes active attempts, includes incomplete attempts as DNFs, and preserves all sessions', () => {
   const complete = sample(), incomplete = { ...sample(), session: 'Other', status: 'incomplete' as const, reason: 'Disconnected.' };
   const [header, first, second, trailing] = cubeastCSV([complete, incomplete, { ...sample(), status: 'active' }], cube).split('\r\n');
